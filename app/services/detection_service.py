@@ -166,12 +166,14 @@ class DetectionService:
         frame: np.ndarray,
         frame_timestamp: datetime,
     ) -> List[Dict[str, Any]]:
-        """Detect weapons in a frame. Also flags suspicious Bags/Box."""
+        """Detect weapons in a frame. Uses higher confidence to avoid false positives."""
         if self.weapon_model is None:
             return []
 
         h, w = frame.shape[:2]
-        results = self.weapon_model(frame, conf=self.confidence_threshold, verbose=False)
+        # Use higher threshold for weapons (0.7) to reduce false positives
+        weapon_conf = max(self.confidence_threshold, 0.7)
+        results = self.weapon_model(frame, conf=weapon_conf, verbose=False)
         detections: List[Dict[str, Any]] = []
 
         for result in results:
@@ -396,6 +398,7 @@ class DetectionService:
                 return {
                     "count": person_count,
                     "density": round(density, 4),
+                    "confidence": round(density, 4),
                 }
             except Exception as e:
                 logger.error("CSRNet inference error: %s", e)
@@ -410,6 +413,7 @@ class DetectionService:
         return {
             "count": person_count,
             "density": round(density, 4),
+            "confidence": round(density, 4),
         }
 
     # ==================================================================

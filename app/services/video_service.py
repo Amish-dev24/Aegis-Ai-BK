@@ -71,19 +71,54 @@ class VideoService:
         self,
         frame: np.ndarray,
         detection_id: int,
-        prefix: str = "snapshot"
+        prefix: str = "snapshot",
+        bbox: list = None,
+        label: str = None,
     ) -> str:
         """
-        Save a frame as a snapshot image.
-        
+        Save a frame as a snapshot image with bounding box drawn.
+
+        Args:
+            bbox: [x_norm, y_norm, w_norm, h_norm] in 0-1 normalized coords
+            label: Text label to draw above the box (e.g. "Weapons 87%")
+
         Returns:
             Path to saved image
         """
+        annotated = frame.copy()
+        h, w = annotated.shape[:2]
+
+        if bbox and len(bbox) >= 4:
+            x1 = int(bbox[0] * w)
+            y1 = int(bbox[1] * h)
+            x2 = int((bbox[0] + bbox[2]) * w)
+            y2 = int((bbox[1] + bbox[3]) * h)
+
+            # Color by prefix type
+            colors = {
+                "weapon": (0, 0, 255),        # Red
+                "mask_face": (255, 165, 0),    # Orange
+                "crowd_density": (255, 255, 0),# Cyan
+                "abandoned_object": (0, 255, 255), # Yellow
+                "violence": (128, 0, 128),     # Purple
+            }
+            color = colors.get(prefix, (0, 255, 0))
+
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+            if label:
+                font_scale = 0.6
+                thickness = 2
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+                cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+                cv2.putText(annotated, label, (x1 + 2, y1 - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{detection_id}_{timestamp}.jpg"
         filepath = self.evidence_dir / filename
-        
-        cv2.imwrite(str(filepath), frame)
+
+        cv2.imwrite(str(filepath), annotated)
         return str(filepath)
     
     def extract_video_clip(

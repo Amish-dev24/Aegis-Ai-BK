@@ -11,7 +11,7 @@ class CameraBase(BaseModel):
     name: str
     location: Optional[str] = None
     description: Optional[str] = None
-    stream_url: str
+    stream_url: Optional[str] = None  # Optional — only needed for future live streaming
     zone: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
