@@ -2,7 +2,7 @@
 API v1 routes aggregation.
 """
 from fastapi import APIRouter
-from app.api.v1 import auth, users, cameras, detections, alerts, evidence, analytics, companies, audit_logs
+from app.api.v1 import auth, users, cameras, detections, alerts, evidence, analytics, companies, audit_logs, detection_settings
 
 api_router = APIRouter()
 
@@ -15,3 +15,4 @@ api_router.include_router(alerts.router)
 api_router.include_router(evidence.router)
 api_router.include_router(analytics.router)
 api_router.include_router(audit_logs.router)
+api_router.include_router(detection_settings.router)

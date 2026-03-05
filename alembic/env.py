@@ -22,7 +22,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import all models so Alembic can detect them
-from app.models import user, company, camera, detection, alert, evidence, audit_log
+from app.models import user, company, camera, detection, alert, evidence, audit_log, detection_settings
 
 target_metadata = Base.metadata
 

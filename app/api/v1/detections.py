@@ -66,8 +66,8 @@ async def create_detection(
     ))
     db.commit()
 
-    # Create alert + send email for high/critical threats
-    if db_detection.threat_level in [ThreatLevel.HIGH, ThreatLevel.CRITICAL]:
+    # Create alert + send email for medium/high/critical threats
+    if db_detection.threat_level in [ThreatLevel.MEDIUM, ThreatLevel.HIGH, ThreatLevel.CRITICAL]:
         alert = Alert(
             detection_id=db_detection.id,
             company_id=camera.company_id,
@@ -202,6 +202,9 @@ async def process_video(
         last_detection_time: dict = {}  # Track last detection time per type to avoid duplicates
         dedup_interval = 2.0  # Minimum seconds between same detection type
 
+        # Get enabled modules (respects global + company settings)
+        enabled_modules = detection_service.get_enabled_modules(db, camera.company_id)
+
         for frame, timestamp in video_service.read_video_file(str(upload_path)):
             frame_index += 1
             if frame_index % process_every_n != 0:
@@ -209,28 +212,33 @@ async def process_video(
             all_raw_detections: list[tuple[DetectionType, dict]] = []
 
             # --- 1. Weapon detection (YOLOv8) ---
-            for det in detection_service.detect_weapons(frame, timestamp):
-                all_raw_detections.append((DetectionType.WEAPON, det))
+            if "weapon" in enabled_modules:
+                for det in detection_service.detect_weapons(frame, timestamp):
+                    all_raw_detections.append((DetectionType.WEAPON, det))
 
             # --- 2. Violence / aggression detection (MediaPipe + motion) ---
-            violence = detection_service.detect_violence(frame, previous_frames, timestamp)
-            if violence["is_violent"]:
-                all_raw_detections.append((DetectionType.VIOLENCE, violence))
+            if "violence" in enabled_modules:
+                violence = detection_service.detect_violence(frame, previous_frames, timestamp)
+                if violence["is_violent"]:
+                    all_raw_detections.append((DetectionType.VIOLENCE, violence))
 
             # --- 3. Abandoned object detection (MOG2) ---
-            for det in detection_service.detect_abandoned_object(
-                frame, None, timestamp, object_history
-            ):
-                all_raw_detections.append((DetectionType.ABANDONED_OBJECT, det))
+            if "abandoned_object" in enabled_modules:
+                for det in detection_service.detect_abandoned_object(
+                    frame, None, timestamp, object_history
+                ):
+                    all_raw_detections.append((DetectionType.ABANDONED_OBJECT, det))
 
             # --- 4. Mask / face obfuscation detection ---
-            for det in detection_service.detect_mask_face(frame, timestamp):
-                all_raw_detections.append((DetectionType.MASK_FACE, det))
+            if "mask_face" in enabled_modules:
+                for det in detection_service.detect_mask_face(frame, timestamp):
+                    all_raw_detections.append((DetectionType.MASK_FACE, det))
 
             # --- 5. Crowd density monitoring ---
-            crowd = detection_service.calculate_crowd_density(frame, timestamp)
-            if crowd["count"] > 0:
-                all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
+            if "crowd_density" in enabled_modules:
+                crowd = detection_service.calculate_crowd_density(frame, timestamp)
+                if crowd["count"] > 0:
+                    all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
 
             # Persist detections (deduplicated — skip if same type detected within 2 sec)
             for det_type, det in all_raw_detections:
@@ -240,7 +248,14 @@ async def process_video(
                 last_detection_time[det_type] = timestamp
 
                 confidence = det.get("confidence", 0.0)
-                threat_level = detection_service.classify_threat_level(det_type, confidence, det)
+                module_settings = enabled_modules.get(det_type.value, {})
+
+                # Skip if below company's custom min_confidence
+                min_conf = module_settings.get("min_confidence")
+                if min_conf and confidence < min_conf:
+                    continue
+
+                threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
                 bbox = det.get("bbox", [0, 0, 0, 0])
 
                 db_detection = Detection(
@@ -271,9 +286,10 @@ async def process_video(
                     metadata_json=str(det),
                 )
                 db.add(db_evidence)
+                db.flush()  # get db_evidence.id
 
-                # Auto-create alert + send email for HIGH / CRITICAL threats
-                if threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+                # Auto-create alert + send email for MEDIUM / HIGH / CRITICAL threats
+                if threat_level in (ThreatLevel.MEDIUM, ThreatLevel.HIGH, ThreatLevel.CRITICAL):
                     alert = Alert(
                         detection_id=db_detection.id,
                         company_id=camera.company_id,
@@ -378,25 +394,39 @@ async def process_image(
     detection_results = []
     all_raw_detections: list[tuple] = []
 
+    # Get enabled modules (respects global + company settings)
+    enabled_modules = detection_service.get_enabled_modules(db, camera.company_id)
+
     # Run all detection modules on the single frame
-    for det in detection_service.detect_weapons(frame, timestamp):
-        all_raw_detections.append((DetectionType.WEAPON, det))
+    if "weapon" in enabled_modules:
+        for det in detection_service.detect_weapons(frame, timestamp):
+            all_raw_detections.append((DetectionType.WEAPON, det))
 
-    violence = detection_service.detect_violence(frame, [], timestamp)
-    if violence["is_violent"]:
-        all_raw_detections.append((DetectionType.VIOLENCE, violence))
+    if "violence" in enabled_modules:
+        violence = detection_service.detect_violence(frame, [], timestamp)
+        if violence["is_violent"]:
+            all_raw_detections.append((DetectionType.VIOLENCE, violence))
 
-    for det in detection_service.detect_mask_face(frame, timestamp):
-        all_raw_detections.append((DetectionType.MASK_FACE, det))
+    if "mask_face" in enabled_modules:
+        for det in detection_service.detect_mask_face(frame, timestamp):
+            all_raw_detections.append((DetectionType.MASK_FACE, det))
 
-    crowd = detection_service.calculate_crowd_density(frame, timestamp)
-    if crowd["count"] > 0:
-        all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
+    if "crowd_density" in enabled_modules:
+        crowd = detection_service.calculate_crowd_density(frame, timestamp)
+        if crowd["count"] > 0:
+            all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
 
     # Save detections
     for det_type, det in all_raw_detections:
         confidence = det.get("confidence", 0.0)
-        threat_level = detection_service.classify_threat_level(det_type, confidence, det)
+        module_settings = enabled_modules.get(det_type.value, {})
+
+        # Skip if below company's custom min_confidence
+        min_conf = module_settings.get("min_confidence")
+        if min_conf and confidence < min_conf:
+            continue
+
+        threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
         bbox = det.get("bbox", [0, 0, 0, 0])
 
         db_detection = Detection(
@@ -426,8 +456,9 @@ async def process_image(
             metadata_json=str(det),
         )
         db.add(db_evidence)
+        db.flush()  # get db_evidence.id
 
-        if threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+        if threat_level in (ThreatLevel.MEDIUM, ThreatLevel.HIGH, ThreatLevel.CRITICAL):
             alert = Alert(
                 detection_id=db_detection.id,
                 company_id=camera.company_id,

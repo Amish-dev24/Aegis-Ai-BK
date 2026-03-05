@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.database import Base, engine
-from app.models import user, camera, detection, alert, evidence, audit_log
+from app.models import user, camera, detection, alert, evidence, audit_log, detection_settings
 from app.config import settings
 
 
