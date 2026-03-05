@@ -194,10 +194,18 @@ async def process_video(
     try:
         detections_created = 0
         alerts_created = 0
+        detection_results = []  # Store results to return
         previous_frames: list = []
         object_history: dict = {}
+        frame_index = 0
+        process_every_n = 10  # Process every 10th frame (~3 fps for 30fps video)
+        last_detection_time: dict = {}  # Track last detection time per type to avoid duplicates
+        dedup_interval = 2.0  # Minimum seconds between same detection type
 
         for frame, timestamp in video_service.read_video_file(str(upload_path)):
+            frame_index += 1
+            if frame_index % process_every_n != 0:
+                continue
             all_raw_detections: list[tuple[DetectionType, dict]] = []
 
             # --- 1. Weapon detection (YOLOv8) ---
@@ -217,16 +225,20 @@ async def process_video(
 
             # --- 4. Mask / face obfuscation detection ---
             for det in detection_service.detect_mask_face(frame, timestamp):
-                if det.get("is_masked"):
-                    all_raw_detections.append((DetectionType.MASK_FACE, det))
+                all_raw_detections.append((DetectionType.MASK_FACE, det))
 
             # --- 5. Crowd density monitoring ---
             crowd = detection_service.calculate_crowd_density(frame, timestamp)
-            if crowd["density"] >= 0.7:
+            if crowd["count"] > 0:
                 all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
 
-            # Persist every raw detection
+            # Persist detections (deduplicated — skip if same type detected within 2 sec)
             for det_type, det in all_raw_detections:
+                elapsed = (timestamp - last_detection_time.get(det_type, datetime.min)).total_seconds()
+                if elapsed < dedup_interval:
+                    continue
+                last_detection_time[det_type] = timestamp
+
                 confidence = det.get("confidence", 0.0)
                 threat_level = detection_service.classify_threat_level(det_type, confidence, det)
                 bbox = det.get("bbox", [0, 0, 0, 0])
@@ -247,8 +259,12 @@ async def process_video(
                 db.add(db_detection)
                 db.flush()  # get db_detection.id
 
-                # Save evidence snapshot
-                snapshot_path = video_service.save_snapshot(frame, db_detection.id, prefix=det_type.value)
+                # Save evidence snapshot with bounding box drawn
+                label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+                snapshot_path = video_service.save_snapshot(
+                    frame, db_detection.id, prefix=det_type.value,
+                    bbox=bbox, label=label,
+                )
                 db_evidence = Evidence(
                     detection_id=db_detection.id,
                     image_path=snapshot_path,
@@ -285,6 +301,15 @@ async def process_video(
                     alert.email_sent_at = datetime.utcnow()
                     alerts_created += 1
 
+                detection_results.append({
+                    "id": db_detection.id,
+                    "detection_type": det_type.value,
+                    "threat_level": threat_level.value,
+                    "confidence": round(confidence, 4),
+                    "class": det.get("class", det_type.value),
+                    "evidence_id": db_evidence.id if db_evidence else None,
+                    "timestamp": timestamp.isoformat(),
+                })
                 detections_created += 1
 
             # Keep a sliding window of previous frames for temporal analysis
@@ -304,13 +329,157 @@ async def process_video(
 
         return {
             "message": f"Processed video, created {detections_created} detections and {alerts_created} alerts",
-            "detections": detections_created,
-            "alerts": alerts_created,
+            "total_detections": detections_created,
+            "total_alerts": alerts_created,
+            "detections": detection_results,
         }
     finally:
         # Clean up temporary uploaded file
         if upload_path.exists():
             os.remove(upload_path)
+
+
+@router.post("/process-image")
+async def process_image(
+    camera_id: int,
+    image_file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_security_officer)
+):
+    """Process a single image through all detection modules."""
+    # Verify camera exists
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not camera:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found"
+        )
+
+    if camera.company_id and not check_company_access(current_user, camera.company_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions to process image for this camera"
+        )
+
+    # Read image into OpenCV frame
+    content = await image_file.read()
+    nparr = np.frombuffer(content, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if frame is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid image file"
+        )
+
+    timestamp = datetime.utcnow()
+    detections_created = 0
+    alerts_created = 0
+    detection_results = []
+    all_raw_detections: list[tuple] = []
+
+    # Run all detection modules on the single frame
+    for det in detection_service.detect_weapons(frame, timestamp):
+        all_raw_detections.append((DetectionType.WEAPON, det))
+
+    violence = detection_service.detect_violence(frame, [], timestamp)
+    if violence["is_violent"]:
+        all_raw_detections.append((DetectionType.VIOLENCE, violence))
+
+    for det in detection_service.detect_mask_face(frame, timestamp):
+        all_raw_detections.append((DetectionType.MASK_FACE, det))
+
+    crowd = detection_service.calculate_crowd_density(frame, timestamp)
+    if crowd["count"] > 0:
+        all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
+
+    # Save detections
+    for det_type, det in all_raw_detections:
+        confidence = det.get("confidence", 0.0)
+        threat_level = detection_service.classify_threat_level(det_type, confidence, det)
+        bbox = det.get("bbox", [0, 0, 0, 0])
+
+        db_detection = Detection(
+            camera_id=camera_id,
+            company_id=camera.company_id,
+            detection_type=det_type,
+            threat_level=threat_level,
+            confidence=confidence,
+            frame_timestamp=timestamp,
+            bbox_x=bbox[0] if len(bbox) > 0 else None,
+            bbox_y=bbox[1] if len(bbox) > 1 else None,
+            bbox_width=bbox[2] if len(bbox) > 2 else None,
+            bbox_height=bbox[3] if len(bbox) > 3 else None,
+            detection_metadata=det,
+        )
+        db.add(db_detection)
+        db.flush()
+
+        label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+        snapshot_path = video_service.save_snapshot(
+            frame, db_detection.id, prefix=det_type.value,
+            bbox=bbox, label=label,
+        )
+        db_evidence = Evidence(
+            detection_id=db_detection.id,
+            image_path=snapshot_path,
+            metadata_json=str(det),
+        )
+        db.add(db_evidence)
+
+        if threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+            alert = Alert(
+                detection_id=db_detection.id,
+                company_id=camera.company_id,
+                title=f"{det_type.value.replace('_', ' ').title()} – {threat_level.value.upper()}",
+                message=f"{det_type.value} detected with {confidence:.0%} confidence",
+                status=AlertStatus.PENDING,
+            )
+            db.add(alert)
+            db.flush()
+            await email_service.send_alert_email(
+                to_emails=[current_user.email],
+                subject=alert.title,
+                message=alert.message,
+                snapshot_path=snapshot_path,
+                metadata={
+                    "Detection Type": det_type.value,
+                    "Threat Level": threat_level.value,
+                    "Confidence": f"{confidence:.2%}",
+                    "Camera": camera.name,
+                    "Timestamp": timestamp.isoformat(),
+                },
+            )
+            alert.email_sent = True
+            alert.email_sent_at = datetime.utcnow()
+            alerts_created += 1
+
+        detection_results.append({
+            "id": db_detection.id,
+            "detection_type": det_type.value,
+            "threat_level": threat_level.value,
+            "confidence": round(confidence, 4),
+            "class": det.get("class", det_type.value),
+            "evidence_id": db_evidence.id if db_evidence else None,
+            "timestamp": timestamp.isoformat(),
+        })
+        detections_created += 1
+
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="process_image",
+        resource_type="camera",
+        resource_id=camera_id,
+        details={"filename": image_file.filename, "detections": detections_created, "alerts": alerts_created},
+    ))
+    db.commit()
+
+    return {
+        "message": f"Processed image, created {detections_created} detections and {alerts_created} alerts",
+        "total_detections": detections_created,
+        "total_alerts": alerts_created,
+        "detections": detection_results,
+    }
 
 
 @router.get("/stats/summary")

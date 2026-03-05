@@ -1,6 +1,8 @@
 # Aegis AI - Intelligent Surveillance Platform (Backend)
 
-End-to-end intelligent surveillance platform that analyzes recorded video footage to detect security threats automatically using AI models.
+Intelligent surveillance platform that analyzes **uploaded videos and images** to detect security threats automatically using AI models.
+
+> **Note:** Currently supports uploaded video files and images only. Live camera streaming (RTSP) is not yet implemented.
 
 ## Features
 
@@ -166,10 +168,91 @@ docker-compose up -d
 
 This starts PostgreSQL, Redis, and the FastAPI app together. Place model files in the `models/` directory before processing videos.
 
-## API Endpoints
+## How It Works (Step-by-Step Usage Flow)
+
+### Step 1: Login
+```
+POST /api/v1/auth/login
+Body: { username, password }
+```
+Returns `access_token` (30 min) + `refresh_token` (2 hours). Use the access token in all subsequent requests as `Authorization: Bearer <access_token>`.
+
+### Step 2: Create a Camera
+Before uploading any video/image, you need to register a camera (this is like a "source" for detections).
+```
+POST /api/v1/cameras
+Headers: Authorization: Bearer <access_token>
+Body: { "name": "Front Gate Camera", "location": "Main Entrance", "zone": "Zone A" }
+```
+> `stream_url` is optional — not needed for uploaded files. Note the `camera_id` from the response.
+
+### Step 3: Upload a Video or Image for AI Analysis
+
+**Option A — Upload a Video:**
+```
+POST /api/v1/detections/process-video?camera_id=1
+Headers: Authorization: Bearer <access_token>
+Body: form-data → video_file: <your_video.mp4>
+```
+The backend will:
+1. Save the video to `uploads/`
+2. Extract frames using OpenCV (processes every 10th frame for performance)
+3. Run each frame through all AI models:
+   - **Weapon detection** (YOLOv8) → Weapons, Bags, Boxes
+   - **Face detection** (YOLOv8) → covered/uncovered faces
+   - **Crowd density** (CSRNet) → person count estimate
+   - **Abandoned object** (YOLOv8 + background subtraction) → stationary Bags/Boxes for 60+ sec
+4. Save each detection to the database with bounding box coordinates
+5. Save evidence snapshots to `evidence/`
+6. Auto-create alerts + send emails for HIGH/CRITICAL threats
+7. Delete the uploaded video after processing
+
+**Option B — Upload a Single Image:**
+```
+POST /api/v1/detections/process-image?camera_id=1
+Headers: Authorization: Bearer <access_token>
+Body: form-data → image_file: <your_image.jpg>
+```
+Same as video but runs all models on just the one image frame.
+
+### Step 4: View Results
+
+**List all detections:**
+```
+GET /api/v1/detections
+```
+
+**View alerts (auto-created for dangerous detections):**
+```
+GET /api/v1/alerts
+```
+
+**Download evidence snapshots:**
+```
+GET /api/v1/evidence/{id}/download
+```
+
+**View analytics:**
+```
+GET /api/v1/analytics/heatmap
+GET /api/v1/analytics/timeline
+GET /api/v1/analytics/threat-distribution
+GET /api/v1/analytics/top-cameras
+```
+
+### Step 5: Token Refresh
+When the access token expires (30 min), call:
+```
+POST /api/v1/auth/refresh
+Body: { "refresh_token": "<your_refresh_token>" }
+```
+Returns a new access token. After 2 hours (refresh token expires), user must login again.
+
+---
+
+## All API Endpoints
 
 ### Authentication
-
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | POST | `/api/v1/auth/login` | Login (returns access + refresh token) | No |
@@ -177,14 +260,7 @@ This starts PostgreSQL, Redis, and the FastAPI app together. Place model files i
 | POST | `/api/v1/auth/register` | Register new user | Admin only |
 | GET | `/api/v1/auth/me` | Get current user info | Any |
 
-### Token System
-
-- **Access token** expires in **30 minutes** - used in `Authorization: Bearer <token>` header
-- **Refresh token** expires in **2 hours** - send to `/auth/refresh` to get a new access token
-- After 2 hours, the user must login again
-
 ### Users
-
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | GET | `/api/v1/users` | List users | Admin |
@@ -193,7 +269,6 @@ This starts PostgreSQL, Redis, and the FastAPI app together. Place model files i
 | DELETE | `/api/v1/users/{id}` | Delete user | Admin |
 
 ### Cameras
-
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | POST | `/api/v1/cameras` | Create camera | Security Officer+ |
@@ -203,17 +278,16 @@ This starts PostgreSQL, Redis, and the FastAPI app together. Place model files i
 | DELETE | `/api/v1/cameras/{id}` | Delete camera | Security Officer+ |
 
 ### Detections
-
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | POST | `/api/v1/detections` | Create detection manually | Security Officer+ |
 | GET | `/api/v1/detections` | List detections (filterable) | Any |
 | GET | `/api/v1/detections/{id}` | Get detection details | Any |
 | POST | `/api/v1/detections/process-video` | Upload & process video with AI | Security Officer+ |
+| POST | `/api/v1/detections/process-image` | Upload & process image with AI | Security Officer+ |
 | GET | `/api/v1/detections/stats/summary` | Detection statistics | Any |
 
 ### Alerts
-
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | POST | `/api/v1/alerts` | Create alert | Security Officer+ |
@@ -223,7 +297,6 @@ This starts PostgreSQL, Redis, and the FastAPI app together. Place model files i
 | POST | `/api/v1/alerts/{id}/acknowledge` | Acknowledge alert | Security Officer+ |
 
 ### Evidence
-
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | POST | `/api/v1/evidence` | Upload evidence | Security Officer+ |
@@ -233,7 +306,6 @@ This starts PostgreSQL, Redis, and the FastAPI app together. Place model files i
 | POST | `/api/v1/evidence/export` | Export evidence as CSV | Admin |
 
 ### Analytics
-
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | GET | `/api/v1/analytics/heatmap` | Detection heatmap data | Any |
@@ -241,22 +313,6 @@ This starts PostgreSQL, Redis, and the FastAPI app together. Place model files i
 | GET | `/api/v1/analytics/by-zone` | Detections grouped by zone | Any |
 | GET | `/api/v1/analytics/threat-distribution` | Threat level breakdown | Any |
 | GET | `/api/v1/analytics/top-cameras` | Top cameras by detection count | Any |
-
-## AI Detection Pipeline
-
-When a video is uploaded to `/api/v1/detections/process-video`:
-
-1. Video is saved to `uploads/` directory
-2. OpenCV extracts frames (with FPS-based timestamps)
-3. Each frame is passed through all active detection modules:
-   - **Weapon detection** (YOLOv8) - detects Weapons, Bags, Boxes
-   - **Face detection** (YOLOv8) - detects covered/uncovered faces
-   - **Crowd density** (CSRNet) - estimates person count
-   - **Abandoned object** (YOLOv8 + MOG2 background subtraction) - tracks stationary Bags/Boxes for 60+ seconds
-   - **Violence detection** - currently returns empty (no pose model)
-4. Each detection is saved to the database with bounding box coordinates
-5. Evidence snapshots are saved to `evidence/` directory
-6. HIGH/CRITICAL threats auto-create alerts and send email notifications
 
 ## Roles & Permissions
 
