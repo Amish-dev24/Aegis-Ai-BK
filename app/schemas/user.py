@@ -28,6 +28,7 @@ class UserUpdate(BaseModel):
     role: Optional[Role] = None
     is_active: Optional[bool] = None
     password: Optional[str] = None
+    company_id: Optional[int] = None
 
 
 class UserResponse(UserBase):

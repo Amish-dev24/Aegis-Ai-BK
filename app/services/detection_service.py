@@ -419,57 +419,104 @@ class DetectionService:
     # ==================================================================
     # Threat-level classification (decision engine)
     # ==================================================================
+
+    # Default thresholds per detection type: (critical, high, medium)
+    DEFAULT_THRESHOLDS = {
+        DetectionType.WEAPON:           (0.9, 0.7, 0.5),
+        DetectionType.VIOLENCE:         (0.8, 0.65, 0.5),
+        DetectionType.ABANDONED_OBJECT: (None, 0.8, 0.5),   # No CRITICAL for abandoned
+        DetectionType.MASK_FACE:        (None, None, 0.9),   # Max MEDIUM for face/mask
+        DetectionType.CROWD_DENSITY:    (None, 0.9, 0.7),    # Uses density value
+    }
+
     def classify_threat_level(
         self,
         detection_type: DetectionType,
         confidence: float,
         metadata: Optional[Dict[str, Any]] = None,
+        company_thresholds: Optional[Dict[str, Optional[float]]] = None,
     ) -> ThreatLevel:
-        """Classify threat level based on detection type and confidence."""
-        if detection_type == DetectionType.WEAPON:
-            if confidence >= 0.9:
-                return ThreatLevel.CRITICAL
-            elif confidence >= 0.7:
-                return ThreatLevel.HIGH
-            elif confidence >= 0.5:
-                return ThreatLevel.MEDIUM
-            else:
-                return ThreatLevel.LOW
+        """
+        Classify threat level based on detection type and confidence.
 
-        elif detection_type == DetectionType.VIOLENCE:
-            if confidence >= 0.8:
-                return ThreatLevel.CRITICAL
-            elif confidence >= 0.65:
-                return ThreatLevel.HIGH
-            elif confidence >= 0.5:
-                return ThreatLevel.MEDIUM
-            else:
-                return ThreatLevel.LOW
+        If company_thresholds is provided (from CompanyDetectionSettings),
+        it overrides the default thresholds for that module.
+        company_thresholds keys: critical_threshold, high_threshold, medium_threshold
+        """
+        # For crowd density, use the density value instead of raw confidence
+        value = confidence
+        if detection_type == DetectionType.CROWD_DENSITY:
+            value = metadata.get("density", 0.0) if metadata else 0.0
 
-        elif detection_type == DetectionType.ABANDONED_OBJECT:
-            if confidence >= 0.8:
-                return ThreatLevel.HIGH
-            elif confidence >= 0.5:
-                return ThreatLevel.MEDIUM
-            else:
-                return ThreatLevel.LOW
+        # Get thresholds — company overrides > defaults
+        defaults = self.DEFAULT_THRESHOLDS.get(detection_type, (None, None, None))
+        if company_thresholds:
+            ct = company_thresholds.get("critical_threshold") or defaults[0]
+            ht = company_thresholds.get("high_threshold") or defaults[1]
+            mt = company_thresholds.get("medium_threshold") or defaults[2]
+        else:
+            ct, ht, mt = defaults
 
-        elif detection_type == DetectionType.MASK_FACE:
-            if confidence >= 0.9:
-                return ThreatLevel.MEDIUM
-            else:
-                return ThreatLevel.LOW
-
-        elif detection_type == DetectionType.CROWD_DENSITY:
-            density = metadata.get("density", 0.0) if metadata else 0.0
-            if density >= 0.9:
-                return ThreatLevel.HIGH
-            elif density >= 0.7:
-                return ThreatLevel.MEDIUM
-            else:
-                return ThreatLevel.LOW
-
+        if ct is not None and value >= ct:
+            return ThreatLevel.CRITICAL
+        if ht is not None and value >= ht:
+            return ThreatLevel.HIGH
+        if mt is not None and value >= mt:
+            return ThreatLevel.MEDIUM
         return ThreatLevel.LOW
+
+    def get_enabled_modules(
+        self,
+        db,
+        company_id: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Return a dict of module_name → settings for modules that are active.
+
+        A module is active only if:
+        1. It is globally enabled (GlobalModuleSettings)
+        2. AND the company has not disabled it (CompanyDetectionSettings)
+
+        Returns dict like:
+        {
+            "weapon": {"critical_threshold": 0.9, "high_threshold": 0.7, ...},
+            "mask_face": {...},
+        }
+        """
+        from app.models.detection_settings import GlobalModuleSettings, CompanyDetectionSettings
+
+        # 1. Check global settings
+        global_settings = {s.module_name: s.is_enabled for s in db.query(GlobalModuleSettings).all()}
+
+        # 2. Check company settings
+        company_settings = {}
+        if company_id:
+            for cs in db.query(CompanyDetectionSettings).filter(CompanyDetectionSettings.company_id == company_id).all():
+                company_settings[cs.module_name] = cs
+
+        enabled: Dict[str, Dict[str, Any]] = {}
+        for dt in DetectionType:
+            module = dt.value
+
+            # Skip if globally disabled
+            if not global_settings.get(module, True):
+                continue
+
+            # Skip if company disabled it
+            cs = company_settings.get(module)
+            if cs and not cs.is_enabled:
+                continue
+
+            # Build threshold overrides
+            thresholds: Dict[str, Any] = {}
+            if cs:
+                thresholds["critical_threshold"] = cs.critical_threshold
+                thresholds["high_threshold"] = cs.high_threshold
+                thresholds["medium_threshold"] = cs.medium_threshold
+                thresholds["min_confidence"] = cs.min_confidence
+            enabled[module] = thresholds
+
+        return enabled
 
 
 detection_service = DetectionService()
