@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
-from app.core.security import require_aegis_admin, get_current_user
+from app.core.security import require_aegis_admin, require_admin, get_current_user, check_company_access
 from app.schemas.company import (
     CompanyCreate, 
     CompanyResponse, 
@@ -107,16 +107,22 @@ async def get_companies_stats(
 async def get_company(
     company_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_aegis_admin)
+    current_user: User = Depends(require_admin)
 ):
-    """Get company details with user count (Aegis AI admin only)."""
+    """Get company details with user count. Admins can only see their own company."""
+    if not check_company_access(current_user, company_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions to access this company"
+        )
+
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Company not found"
         )
-    
+
     # Count users
     user_count = db.query(func.count(User.id)).filter(User.company_id == company.id).scalar()
     active_user_count = db.query(func.count(User.id)).filter(
@@ -145,9 +151,15 @@ async def get_company(
 async def get_company_users(
     company_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_aegis_admin)
+    current_user: User = Depends(require_admin)
 ):
-    """Get all users for a company (Aegis AI admin only)."""
+    """Get all users for a company. Admins can only see their own company's users."""
+    if not check_company_access(current_user, company_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions to access this company"
+        )
+
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(
