@@ -16,8 +16,9 @@ from app.core.security import (
 )
 from jose import JWTError, jwt
 from app.config import settings
-from app.schemas.user import Token, UserResponse, UserCreate
+from app.schemas.user import Token, UserResponse, UserCreate, UserSignup
 from app.models.user import User, Role
+from app.models.company import Company
 from app.models.audit_log import AuditLog
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -111,6 +112,55 @@ async def refresh_token(
         "refresh_token": refresh_token,
         "token_type": "bearer"
     }
+
+
+@router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def signup(
+    user_data: UserSignup,
+    db: Session = Depends(get_db),
+):
+    """Public signup — no login required.
+
+    Creates a new user with role=viewer and is_active=False.
+    An admin must activate the user before they can login.
+    """
+    # Check if username already taken
+    if db.query(User).filter(User.username == user_data.username).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
+    # Check if email already taken
+    if db.query(User).filter(User.email == user_data.email).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+
+    # Validate company exists (if provided)
+    if user_data.company_id:
+        company = db.query(Company).filter(Company.id == user_data.company_id).first()
+        if not company:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Company not found"
+            )
+
+    hashed_password = get_password_hash(user_data.password)
+    db_user = User(
+        username=user_data.username,
+        email=user_data.email,
+        hashed_password=hashed_password,
+        full_name=user_data.full_name,
+        role=Role.VIEWER,
+        company_id=user_data.company_id,
+        is_active=False,  # Admin must activate
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+
+    return db_user
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

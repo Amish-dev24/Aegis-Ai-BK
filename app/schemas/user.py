@@ -15,8 +15,17 @@ class UserBase(BaseModel):
     role: Role = Role.VIEWER
 
 
+class UserSignup(BaseModel):
+    """Schema for public signup (no login required)."""
+    username: str
+    email: EmailStr
+    password: str
+    full_name: Optional[str] = None
+    company_id: Optional[int] = None
+
+
 class UserCreate(UserBase):
-    """Schema for creating a user."""
+    """Schema for creating a user (admin only)."""
     password: str
     company_id: Optional[int] = None  # Required for company users, optional for Aegis AI admins
 
