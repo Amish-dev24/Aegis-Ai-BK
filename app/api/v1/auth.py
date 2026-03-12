@@ -2,7 +2,7 @@
 Authentication endpoints.
 """
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -19,13 +19,14 @@ from app.config import settings
 from app.schemas.user import Token, UserResponse, UserCreate, UserSignup
 from app.models.user import User, Role
 from app.models.company import Company
-from app.models.audit_log import AuditLog
+from app.models.audit_log import create_audit_log
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
 @router.post("/login", response_model=Token)
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
@@ -54,13 +55,10 @@ async def login(
     )
 
     # Log authentication
-    audit_log = AuditLog(
-        user_id=user.id,
-        action="login",
-        resource_type="user",
-        resource_id=user.id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, user.id, "login", "user", user.id,
+        {"username": user.username, "role": user.role.value}
+    ))
     db.commit()
 
     return {
@@ -152,6 +150,7 @@ async def signup(
         email=user_data.email,
         hashed_password=hashed_password,
         full_name=user_data.full_name,
+        phone_number=user_data.phone_number,
         role=Role.VIEWER,
         company_id=user_data.company_id,
         is_active=False,  # Admin must activate
@@ -165,6 +164,7 @@ async def signup(
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(
+    request: Request,
     user_data: UserCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -204,6 +204,7 @@ async def register(
         email=user_data.email,
         hashed_password=hashed_password,
         full_name=user_data.full_name,
+        phone_number=user_data.phone_number,
         role=user_data.role,
         company_id=company_id
     )
@@ -212,15 +213,12 @@ async def register(
     db.refresh(db_user)
     
     # Log user creation
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="create_user",
-        resource_type="user",
-        resource_id=db_user.id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "create_user", "user", db_user.id,
+        {"username": db_user.username, "role": db_user.role.value, "company_id": db_user.company_id}
+    ))
     db.commit()
-    
+
     return db_user
 
 

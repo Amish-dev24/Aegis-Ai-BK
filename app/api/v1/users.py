@@ -2,14 +2,14 @@
 User management endpoints.
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import require_admin, get_current_user, get_user_company_filter, check_company_access
 from app.schemas.user import UserResponse, UserUpdate, UserCreate
 from app.models.user import User, Role
 from app.models.company import Company
-from app.models.audit_log import AuditLog
+from app.models.audit_log import create_audit_log
 from app.core.security import get_password_hash
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -62,6 +62,7 @@ async def get_user(
 
 @router.put("/{user_id}", response_model=UserResponse)
 async def update_user(
+    request: Request,
     user_id: int,
     user_update: UserUpdate,
     db: Session = Depends(get_db),
@@ -89,11 +90,11 @@ async def update_user(
             detail="Cannot assign AEGIS_ADMIN role"
         )
     
-    # Update fields
-    update_data = user_update.dict(exclude_unset=True)
+    # Update fields (skip None values to avoid overwriting with null)
+    update_data = {k: v for k, v in user_update.dict(exclude_unset=True).items() if v is not None}
     if "password" in update_data:
         update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
-    
+
     for field, value in update_data.items():
         setattr(user, field, value)
     
@@ -101,20 +102,18 @@ async def update_user(
     db.refresh(user)
     
     # Log update
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="update_user",
-        resource_type="user",
-        resource_id=user_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "update_user", "user", user_id,
+        {"updated_fields": list(update_data.keys()), "target_user": user.username}
+    ))
     db.commit()
-    
+
     return user
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
+    request: Request,
     user_data: UserCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -154,6 +153,7 @@ async def create_user(
         email=user_data.email,
         hashed_password=hashed_password,
         full_name=user_data.full_name,
+        phone_number=user_data.phone_number,
         role=user_data.role,
         company_id=company_id
     )
@@ -162,20 +162,18 @@ async def create_user(
     db.refresh(db_user)
     
     # Log user creation
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="create_user",
-        resource_type="user",
-        resource_id=db_user.id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "create_user", "user", db_user.id,
+        {"username": db_user.username, "role": db_user.role.value, "company_id": db_user.company_id}
+    ))
     db.commit()
-    
+
     return db_user
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
+    request: Request,
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -196,13 +194,10 @@ async def delete_user(
         )
     
     # Log deletion
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="delete_user",
-        resource_type="user",
-        resource_id=user_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "delete_user", "user", user_id,
+        {"deleted_user": user.username, "email": user.email}
+    ))
     db.delete(user)
     db.commit()
     

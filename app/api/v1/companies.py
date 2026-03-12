@@ -2,7 +2,7 @@
 Company management endpoints for Aegis AI admins.
 """
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
@@ -19,7 +19,7 @@ from app.models.user import User, Role
 from app.models.camera import Camera
 from app.models.detection import Detection
 from app.models.alert import Alert
-from app.models.audit_log import AuditLog
+from app.models.audit_log import create_audit_log
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 
@@ -186,6 +186,7 @@ async def get_company_users(
 
 @router.post("", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)
 async def create_company(
+    request: Request,
     company_data: CompanyCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_aegis_admin)
@@ -211,20 +212,18 @@ async def create_company(
     db.refresh(db_company)
     
     # Log creation
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="create_company",
-        resource_type="company",
-        resource_id=db_company.id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "create_company", "company", db_company.id,
+        {"name": db_company.name, "domain": db_company.domain}
+    ))
     db.commit()
-    
+
     return db_company
 
 
 @router.put("/{company_id}", response_model=CompanyResponse)
 async def update_company(
+    request: Request,
     company_id: int,
     company_update: CompanyUpdate,
     db: Session = Depends(get_db),
@@ -247,20 +246,18 @@ async def update_company(
     db.refresh(company)
     
     # Log update
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="update_company",
-        resource_type="company",
-        resource_id=company_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "update_company", "company", company_id,
+        {"updated_fields": list(update_data.keys()), "company_name": company.name}
+    ))
     db.commit()
-    
+
     return company
 
 
 @router.post("/{company_id}/verify", response_model=CompanyResponse)
 async def verify_company(
+    request: Request,
     company_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_aegis_admin)
@@ -278,14 +275,11 @@ async def verify_company(
     db.refresh(company)
     
     # Log verification
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="verify_company",
-        resource_type="company",
-        resource_id=company_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "verify_company", "company", company_id,
+        {"company_name": company.name}
+    ))
     db.commit()
-    
+
     return company
 

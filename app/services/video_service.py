@@ -11,10 +11,20 @@ from app.config import settings
 
 class VideoService:
     """Service for processing video streams and files."""
-    
+
+    # Color mapping per detection type (BGR)
+    DETECTION_COLORS = {
+        "weapon": (0, 0, 255),          # Red
+        "mask_face": (0, 165, 255),     # Orange
+        "crowd_density": (255, 255, 0), # Cyan
+        "abandoned_object": (0, 255, 255), # Yellow
+        "violence": (128, 0, 128),      # Purple
+    }
+
     def __init__(self):
         self.upload_dir = Path(settings.UPLOAD_DIR)
         self.evidence_dir = Path(settings.EVIDENCE_DIR)
+        self.processed_dir = Path(settings.PROCESSED_VIDEO_DIR)
     
     def read_video_file(self, video_path: str) -> Generator[Tuple[np.ndarray, datetime], None, None]:
         """
@@ -157,6 +167,76 @@ class VideoService:
         except Exception as e:
             print(f"Error extracting video clip: {e}")
             return False
+
+
+    def get_video_info(self, video_path: str) -> dict:
+        """Get video metadata: total frames, fps, width, height, duration."""
+        cap = cv2.VideoCapture(video_path)
+        info = {
+            "total_frames": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+            "fps": cap.get(cv2.CAP_PROP_FPS) or 30.0,
+            "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        }
+        info["duration_seconds"] = info["total_frames"] / info["fps"] if info["fps"] else 0
+        cap.release()
+        return info
+
+    def draw_detections_on_frame(
+        self, frame: np.ndarray, detections: list
+    ) -> np.ndarray:
+        """
+        Draw bounding boxes and labels on a frame.
+
+        Args:
+            detections: list of dicts with keys:
+                det_type (str), confidence (float), bbox [x,y,w,h] normalized,
+                class_name (str, optional)
+        """
+        annotated = frame.copy()
+        h, w = annotated.shape[:2]
+
+        for det in detections:
+            bbox = det.get("bbox", [])
+            if not bbox or len(bbox) < 4:
+                continue
+
+            x1 = int(bbox[0] * w)
+            y1 = int(bbox[1] * h)
+            x2 = int((bbox[0] + bbox[2]) * w)
+            y2 = int((bbox[1] + bbox[3]) * h)
+
+            det_type = det.get("det_type", "")
+            color = self.DETECTION_COLORS.get(det_type, (0, 255, 0))
+            confidence = det.get("confidence", 0)
+            class_name = det.get("class_name", det_type.replace("_", " ").title())
+
+            # Draw box
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+            # Draw label background + text
+            label = f"{class_name} {confidence:.0%}"
+            font_scale = 0.6
+            thickness = 2
+            (tw, th), _ = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
+            cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(
+                annotated, label, (x1 + 2, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness,
+            )
+
+            # Draw tracking line from bottom-center of bbox to bottom of frame
+            center_x = (x1 + x2) // 2
+            cv2.line(annotated, (center_x, y2), (center_x, h), color, 1, cv2.LINE_AA)
+
+        return annotated
+
+    def create_video_writer(self, output_path: str, fps: float, width: int, height: int):
+        """Create a VideoWriter for the output annotated video."""
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
 
 video_service = VideoService()

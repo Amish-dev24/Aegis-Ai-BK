@@ -2,7 +2,7 @@
 Detection endpoints for managing AI detections.
 """
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from app.database import get_db
@@ -17,7 +17,7 @@ from app.services.video_service import video_service
 from app.services.email_service import email_service
 from app.models.alert import Alert, AlertStatus
 from app.models.evidence import Evidence
-from app.models.audit_log import AuditLog
+from app.models.audit_log import create_audit_log
 import cv2
 import numpy as np
 from datetime import datetime
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/detections", tags=["detections"])
 
 @router.post("", response_model=DetectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_detection(
+    request: Request,
     detection_data: DetectionCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
@@ -57,12 +58,9 @@ async def create_detection(
     db.refresh(db_detection)
 
     # Audit log
-    db.add(AuditLog(
-        user_id=current_user.id,
-        action="create_detection",
-        resource_type="detection",
-        resource_id=db_detection.id,
-        details={"detection_type": db_detection.detection_type.value, "threat_level": db_detection.threat_level.value},
+    db.add(create_audit_log(
+        request, current_user.id, "create_detection", "detection", db_detection.id,
+        {"detection_type": db_detection.detection_type.value, "threat_level": db_detection.threat_level.value}
     ))
     db.commit()
 
@@ -97,6 +95,7 @@ async def create_detection(
         )
         if email_sent:
             alert.email_sent = True
+            alert.email_sent_to = current_user.email
             alert.email_sent_at = datetime.utcnow()
 
         db.commit()
@@ -159,14 +158,17 @@ async def get_detection(
     return detection
 
 
-@router.post("/process-video")
+@router.post("/process-video", deprecated=True)
 async def process_video(
+    request: Request,
     camera_id: int,
     video_file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_security_officer)
 ):
-    """Process a video file through all detection modules."""
+    """Process a video file through all detection modules.
+    DEPRECATED: Use POST /video/process instead for non-blocking processing with progress tracking.
+    """
     # Verify camera exists
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
@@ -314,6 +316,7 @@ async def process_video(
                         },
                     )
                     alert.email_sent = True
+                    alert.email_sent_to = current_user.email
                     alert.email_sent_at = datetime.utcnow()
                     alerts_created += 1
 
@@ -334,12 +337,9 @@ async def process_video(
                 previous_frames.pop(0)
 
         # Audit log for video processing
-        db.add(AuditLog(
-            user_id=current_user.id,
-            action="process_video",
-            resource_type="camera",
-            resource_id=camera_id,
-            details={"filename": video_file.filename, "detections": detections_created, "alerts": alerts_created},
+        db.add(create_audit_log(
+            request, current_user.id, "process_video", "camera", camera_id,
+            {"filename": video_file.filename, "detections": detections_created, "alerts": alerts_created}
         ))
         db.commit()
 
@@ -357,6 +357,7 @@ async def process_video(
 
 @router.post("/process-image")
 async def process_image(
+    request: Request,
     camera_id: int,
     image_file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -482,6 +483,7 @@ async def process_image(
                 },
             )
             alert.email_sent = True
+            alert.email_sent_to = current_user.email
             alert.email_sent_at = datetime.utcnow()
             alerts_created += 1
 
@@ -496,12 +498,9 @@ async def process_image(
         })
         detections_created += 1
 
-    db.add(AuditLog(
-        user_id=current_user.id,
-        action="process_image",
-        resource_type="camera",
-        resource_id=camera_id,
-        details={"filename": image_file.filename, "detections": detections_created, "alerts": alerts_created},
+    db.add(create_audit_log(
+        request, current_user.id, "process_image", "camera", camera_id,
+        {"filename": image_file.filename, "detections": detections_created, "alerts": alerts_created}
     ))
     db.commit()
 

@@ -2,18 +2,20 @@
 Evidence management endpoints.
 All endpoints respect multi-tenant isolation via company access checks.
 """
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Request, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import require_any_authenticated, get_current_user, check_company_access, get_user_company_filter
 from app.schemas.evidence import EvidenceCreate, EvidenceResponse
 from app.models.evidence import Evidence
-from app.models.detection import Detection
+from app.models.detection import Detection, DetectionType, ThreatLevel
+from app.models.camera import Camera
 from app.models.user import User
-from app.models.audit_log import AuditLog
+from app.models.audit_log import create_audit_log
 from pathlib import Path
+from datetime import datetime
 import aiofiles
 import json
 
@@ -27,6 +29,31 @@ def _check_detection_access(detection: Detection, current_user: User):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions to access this evidence"
         )
+
+
+def _enrich_evidence(evidence: Evidence, detection: Detection, camera: Camera = None) -> EvidenceResponse:
+    """Add detection context to evidence response."""
+    # Build image URL from file path: ./evidence/file.jpg -> /evidence/file.jpg
+    image_url = None
+    if evidence.image_path:
+        filename = Path(evidence.image_path).name
+        image_url = f"/evidence/{filename}"
+
+    return EvidenceResponse(
+        id=evidence.id,
+        detection_id=evidence.detection_id,
+        image_path=evidence.image_path,
+        image_url=image_url,
+        video_path=evidence.video_path,
+        metadata_json=evidence.metadata_json,
+        created_at=evidence.created_at,
+        detection_type=detection.detection_type.value if detection else None,
+        threat_level=detection.threat_level.value if detection else None,
+        confidence=detection.confidence if detection else None,
+        camera_id=detection.camera_id if detection else None,
+        camera_name=camera.name if camera else None,
+        detection_timestamp=detection.frame_timestamp if detection else None,
+    )
 
 
 @router.post("", response_model=EvidenceResponse, status_code=status.HTTP_201_CREATED)
@@ -71,23 +98,44 @@ async def create_evidence(
 
 @router.get("", response_model=List[EvidenceResponse])
 async def list_evidence(
-    detection_id: int = None,
+    detection_id: Optional[int] = None,
+    camera_id: Optional[int] = Query(None, description="Filter by camera"),
+    detection_type: Optional[DetectionType] = Query(None, description="Filter by detection type"),
+    threat_level: Optional[ThreatLevel] = Query(None, description="Filter by threat level"),
+    start_date: Optional[datetime] = Query(None, description="Filter from date"),
+    end_date: Optional[datetime] = Query(None, description="Filter to date"),
+    limit: int = Query(50, ge=1, le=500, description="Max results"),
+    offset: int = Query(0, ge=0, description="Skip results"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
-    """List evidence records. Company users see only their company's evidence."""
+    """List evidence with filters and pagination. Includes detection context."""
     company_filter = get_user_company_filter(current_user)
 
-    query = db.query(Evidence).join(Detection, Evidence.detection_id == Detection.id)
+    query = db.query(Evidence, Detection, Camera).join(
+        Detection, Evidence.detection_id == Detection.id
+    ).join(
+        Camera, Detection.camera_id == Camera.id
+    )
 
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
-
     if detection_id:
         query = query.filter(Evidence.detection_id == detection_id)
+    if camera_id:
+        query = query.filter(Detection.camera_id == camera_id)
+    if detection_type:
+        query = query.filter(Detection.detection_type == detection_type)
+    if threat_level:
+        query = query.filter(Detection.threat_level == threat_level)
+    if start_date:
+        query = query.filter(Detection.frame_timestamp >= start_date)
+    if end_date:
+        query = query.filter(Detection.frame_timestamp <= end_date)
 
-    evidence_list = query.all()
-    return evidence_list
+    results = query.order_by(Evidence.created_at.desc()).offset(offset).limit(limit).all()
+
+    return [_enrich_evidence(ev, det, cam) for ev, det, cam in results]
 
 
 @router.get("/{evidence_id}", response_model=EvidenceResponse)
@@ -96,7 +144,7 @@ async def get_evidence(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
-    """Get evidence by ID."""
+    """Get evidence by ID with detection context."""
     evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
     if not evidence:
         raise HTTPException(
@@ -108,7 +156,40 @@ async def get_evidence(
     if detection:
         _check_detection_access(detection, current_user)
 
-    return evidence
+    camera = db.query(Camera).filter(Camera.id == detection.camera_id).first() if detection else None
+
+    return _enrich_evidence(evidence, detection, camera)
+
+
+@router.get("/{evidence_id}/image")
+async def view_evidence_image(
+    evidence_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_authenticated)
+):
+    """View evidence image inline (for displaying in frontend)."""
+    evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
+    if not evidence:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Evidence not found"
+        )
+
+    detection = db.query(Detection).filter(Detection.id == evidence.detection_id).first()
+    if detection:
+        _check_detection_access(detection, current_user)
+
+    file_path = Path(evidence.image_path)
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Evidence file not found"
+        )
+
+    return FileResponse(
+        path=str(file_path),
+        media_type="image/jpeg"
+    )
 
 
 @router.get("/{evidence_id}/download")
@@ -145,6 +226,7 @@ async def download_evidence(
 
 @router.post("/export")
 async def export_evidence(
+    request: Request,
     detection_ids: List[int],
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
@@ -164,11 +246,9 @@ async def export_evidence(
     accessible_ids = [d.id for d in detections]
 
     # Audit log
-    db.add(AuditLog(
-        user_id=current_user.id,
-        action="export_evidence",
-        resource_type="evidence",
-        details={"detection_ids": accessible_ids},
+    db.add(create_audit_log(
+        request, current_user.id, "export_evidence", "evidence", None,
+        {"detection_ids": accessible_ids}
     ))
     db.commit()
 

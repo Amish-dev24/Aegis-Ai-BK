@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import uvicorn
 from app.config import settings
@@ -49,6 +50,9 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+# Serve evidence images as static files
+app.mount("/evidence", StaticFiles(directory=settings.EVIDENCE_DIR), name="evidence")
 
 
 @app.get("/")

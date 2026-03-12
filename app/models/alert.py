@@ -28,6 +28,7 @@ class Alert(Base):
     message = Column(Text)
     status = Column(Enum(AlertStatus), default=AlertStatus.PENDING)
     email_sent = Column(Boolean, default=False)
+    email_sent_to = Column(String(500), nullable=True)  # Comma-separated recipient emails
     email_sent_at = Column(DateTime(timezone=True), nullable=True)
     acknowledged_by = Column(String(100), nullable=True)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)

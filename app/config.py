@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # File Storage
     UPLOAD_DIR: str = "./uploads"
     EVIDENCE_DIR: str = "./evidence"
+    PROCESSED_VIDEO_DIR: str = "./processed_videos"
     MAX_FILE_SIZE_MB: int = 500
     
     # Redis
@@ -62,5 +63,6 @@ settings = Settings()
 # Create directories if they don't exist
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(settings.EVIDENCE_DIR, exist_ok=True)
+os.makedirs(settings.PROCESSED_VIDEO_DIR, exist_ok=True)
 os.makedirs("./models", exist_ok=True)
 
