@@ -238,6 +238,46 @@ class VideoService:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
+    def reencode_to_h264(self, input_path: str) -> str:
+        """
+        Re-encode an mp4v video to H.264 so browsers can play it inline.
+        Replaces the original file. Returns the final path.
+        """
+        import subprocess
+        import shutil
+        import os
+
+        # Check if ffmpeg is available
+        if not shutil.which("ffmpeg"):
+            # ffmpeg not installed — return original (will trigger download instead of play)
+            return input_path
+
+        temp_path = input_path + ".h264.mp4"
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", input_path,
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "23",
+                    "-movflags", "+faststart",  # enables streaming/seeking
+                    "-an",  # no audio track
+                    temp_path,
+                ],
+                check=True,
+                capture_output=True,
+                timeout=300,
+            )
+            # Replace original with h264 version
+            os.replace(temp_path, input_path)
+        except Exception:
+            # If ffmpeg fails, keep the original file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        return input_path
+
 
 video_service = VideoService()
 

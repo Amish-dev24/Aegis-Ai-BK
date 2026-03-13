@@ -3,7 +3,7 @@ Pydantic schemas for alert management.
 """
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from app.models.alert import AlertStatus
 
 
@@ -42,8 +42,30 @@ class AlertResponse(AlertBase):
         from_attributes = True
 
 
+# --- Alert Log schemas ---
+
+class AlertLogCreate(BaseModel):
+    action: str = "note"  # note, dispatched, escalated, status_change, etc.
+    message: str
+
+
+class AlertLogResponse(BaseModel):
+    id: int
+    alert_id: int
+    user_id: int
+    username: Optional[str] = None
+    action: str
+    message: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# --- Enriched alert with detection context + logs ---
+
 class AlertDetailResponse(AlertResponse):
-    """Enriched alert response with detection context, camera info, and evidence image."""
+    """Enriched alert response with detection context, camera info, evidence image, and logs."""
     # Detection context
     detection_type: Optional[str] = None
     threat_level: Optional[str] = None
@@ -58,3 +80,6 @@ class AlertDetailResponse(AlertResponse):
     # Evidence snapshot
     evidence_id: Optional[int] = None
     evidence_image_url: Optional[str] = None
+
+    # Incident logs
+    logs: List[AlertLogResponse] = []

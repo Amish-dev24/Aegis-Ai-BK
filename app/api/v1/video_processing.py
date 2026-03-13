@@ -300,6 +300,9 @@ def _process_video_sync(job_id: str):
 
         db.commit()
 
+        # Re-encode to H.264 so browsers can play the video inline
+        video_service.reencode_to_h264(output_path)
+
         job["status"] = "completed"
         job["progress"] = 100
         job["completed_at"] = datetime.utcnow().isoformat()

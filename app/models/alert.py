@@ -38,4 +38,5 @@ class Alert(Base):
     # Relationships
     detection = relationship("Detection", back_populates="alerts")
     company = relationship("Company", back_populates="alerts")
+    logs = relationship("AlertLog", back_populates="alert", order_by="AlertLog.created_at")
 

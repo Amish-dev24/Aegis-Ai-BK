@@ -1,13 +1,17 @@
 """
-Alert management endpoints with enriched views, filters, and evidence images.
+Alert management endpoints with enriched views, filters, evidence images, and incident logs.
 """
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import require_any_authenticated, require_security_officer, get_user_company_filter, check_company_access
-from app.schemas.alert import AlertCreate, AlertResponse, AlertDetailResponse, AlertUpdate
+from app.schemas.alert import (
+    AlertCreate, AlertResponse, AlertDetailResponse, AlertUpdate,
+    AlertLogCreate, AlertLogResponse,
+)
 from app.models.alert import Alert, AlertStatus
+from app.models.alert_log import AlertLog
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.camera import Camera
 from app.models.evidence import Evidence
@@ -20,8 +24,26 @@ from pathlib import Path
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
-def _enrich_alert(alert: Alert, detection: Detection = None, camera: Camera = None, evidence: Evidence = None) -> dict:
-    """Build enriched alert dict with detection context, camera info, evidence image."""
+def _build_log_responses(alert: Alert, db: Session) -> list:
+    """Build log responses with usernames."""
+    logs = db.query(AlertLog).filter(AlertLog.alert_id == alert.id).order_by(AlertLog.created_at).all()
+    result = []
+    for log in logs:
+        user = db.query(User).filter(User.id == log.user_id).first()
+        result.append(AlertLogResponse(
+            id=log.id,
+            alert_id=log.alert_id,
+            user_id=log.user_id,
+            username=user.username if user else None,
+            action=log.action,
+            message=log.message,
+            created_at=log.created_at,
+        ))
+    return result
+
+
+def _enrich_alert(alert: Alert, detection: Detection = None, camera: Camera = None, evidence: Evidence = None, logs: list = None) -> AlertDetailResponse:
+    """Build enriched alert with detection context, camera info, evidence image, and logs."""
     image_url = None
     if evidence and evidence.image_path:
         filename = Path(evidence.image_path).name
@@ -35,6 +57,7 @@ def _enrich_alert(alert: Alert, detection: Detection = None, camera: Camera = No
         message=alert.message,
         status=alert.status,
         email_sent=alert.email_sent,
+        email_sent_to=alert.email_sent_to,
         email_sent_at=alert.email_sent_at,
         acknowledged_by=alert.acknowledged_by,
         acknowledged_at=alert.acknowledged_at,
@@ -52,6 +75,8 @@ def _enrich_alert(alert: Alert, detection: Detection = None, camera: Camera = No
         # Evidence
         evidence_id=evidence.id if evidence else None,
         evidence_image_url=image_url,
+        # Logs
+        logs=logs or [],
     )
 
 
@@ -131,18 +156,15 @@ async def list_alerts(
     """List alerts with filters. Includes detection context, camera info, and evidence image."""
     company_filter = get_user_company_filter(current_user)
 
-    # Join alert → detection → camera, outer-join evidence (first per detection)
     query = db.query(Alert, Detection, Camera).join(
         Detection, Alert.detection_id == Detection.id
     ).join(
         Camera, Detection.camera_id == Camera.id
     )
 
-    # Company isolation
     if company_filter is not None:
         query = query.filter(Alert.company_id == company_filter)
 
-    # Filters
     if status_filter:
         query = query.filter(Alert.status == status_filter)
     if threat_level:
@@ -158,7 +180,7 @@ async def list_alerts(
 
     results = query.order_by(Alert.created_at.desc()).offset(offset).limit(limit).all()
 
-    # Fetch evidence for each detection (first snapshot)
+    # Batch-fetch evidence
     detection_ids = [det.id for _, det, _ in results]
     evidence_map = {}
     if detection_ids:
@@ -174,7 +196,7 @@ async def list_alerts(
 
 
 # ---------------------------------------------------------------------------
-# GET /alerts/{alert_id}  —  single alert with full detail
+# GET /alerts/{alert_id}  —  single alert with full detail + logs
 # ---------------------------------------------------------------------------
 @router.get("/{alert_id}", response_model=AlertDetailResponse)
 async def get_alert(
@@ -182,7 +204,7 @@ async def get_alert(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
-    """Get alert by ID with detection context, camera info, and evidence image."""
+    """Get alert by ID with detection context, camera info, evidence image, and incident logs."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
@@ -193,8 +215,74 @@ async def get_alert(
     detection = db.query(Detection).filter(Detection.id == alert.detection_id).first()
     camera = db.query(Camera).filter(Camera.id == detection.camera_id).first() if detection else None
     evidence = db.query(Evidence).filter(Evidence.detection_id == alert.detection_id).first()
+    logs = _build_log_responses(alert, db)
 
-    return _enrich_alert(alert, detection, camera, evidence)
+    return _enrich_alert(alert, detection, camera, evidence, logs)
+
+
+# ---------------------------------------------------------------------------
+# POST /alerts/{alert_id}/log  —  add incident log entry
+# ---------------------------------------------------------------------------
+@router.post("/{alert_id}/log", response_model=AlertLogResponse, status_code=status.HTTP_201_CREATED)
+async def add_alert_log(
+    request: Request,
+    alert_id: int,
+    log_data: AlertLogCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_security_officer),
+):
+    """Add an incident log entry to an alert (notes, actions taken, dispatch info)."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+
+    if alert.company_id and not check_company_access(current_user, alert.company_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
+
+    log_entry = AlertLog(
+        alert_id=alert_id,
+        user_id=current_user.id,
+        action=log_data.action,
+        message=log_data.message,
+    )
+    db.add(log_entry)
+
+    db.add(create_audit_log(
+        request, current_user.id, "add_alert_log", "alert", alert_id,
+        {"action": log_data.action, "message": log_data.message}
+    ))
+    db.commit()
+    db.refresh(log_entry)
+
+    return AlertLogResponse(
+        id=log_entry.id,
+        alert_id=log_entry.alert_id,
+        user_id=log_entry.user_id,
+        username=current_user.username,
+        action=log_entry.action,
+        message=log_entry.message,
+        created_at=log_entry.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /alerts/{alert_id}/logs  —  list all logs for an alert
+# ---------------------------------------------------------------------------
+@router.get("/{alert_id}/logs", response_model=List[AlertLogResponse])
+async def list_alert_logs(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_authenticated),
+):
+    """List all incident log entries for an alert."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+
+    if alert.company_id and not check_company_access(current_user, alert.company_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
+
+    return _build_log_responses(alert, db)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +305,8 @@ async def update_alert(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
 
     update_data = alert_update.dict(exclude_unset=True)
+    old_status = alert.status.value
+
     for field, value in update_data.items():
         setattr(alert, field, value)
 
@@ -225,6 +315,16 @@ async def update_alert(
         alert.acknowledged_at = datetime.utcnow()
     elif alert.status == AlertStatus.RESOLVED and not alert.resolved_at:
         alert.resolved_at = datetime.utcnow()
+
+    # Auto-log status changes
+    if "status" in update_data and update_data["status"].value != old_status:
+        auto_log = AlertLog(
+            alert_id=alert.id,
+            user_id=current_user.id,
+            action="status_change",
+            message=f"Status changed from {old_status} to {alert.status.value}",
+        )
+        db.add(auto_log)
 
     db.add(create_audit_log(
         request, current_user.id, "update_alert", "alert", alert.id,
@@ -257,6 +357,15 @@ async def acknowledge_alert(
     alert.status = AlertStatus.ACKNOWLEDGED
     alert.acknowledged_by = current_user.username
     alert.acknowledged_at = datetime.utcnow()
+
+    # Auto-log
+    auto_log = AlertLog(
+        alert_id=alert.id,
+        user_id=current_user.id,
+        action="acknowledged",
+        message=f"Alert acknowledged by {current_user.username}",
+    )
+    db.add(auto_log)
 
     db.add(create_audit_log(
         request, current_user.id, "acknowledge_alert", "alert", alert.id,
