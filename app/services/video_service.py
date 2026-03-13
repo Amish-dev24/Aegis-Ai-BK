@@ -2,7 +2,10 @@
 Video processing service for handling video streams and files.
 """
 import cv2
+import logging
 import numpy as np
+
+logger = logging.getLogger(__name__)
 from typing import Generator, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
@@ -247,22 +250,31 @@ class VideoService:
         import shutil
         import os
 
-        # Check if ffmpeg is available
-        if not shutil.which("ffmpeg"):
-            # ffmpeg not installed — return original (will trigger download instead of play)
+        # Find ffmpeg: system install or bundled via imageio-ffmpeg
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            try:
+                import imageio_ffmpeg
+                ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+            except (ImportError, Exception):
+                ffmpeg_bin = None
+
+        if not ffmpeg_bin:
+            logger.warning("ffmpeg not available — video will not be browser-playable")
             return input_path
 
         temp_path = input_path + ".h264.mp4"
         try:
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
+                    ffmpeg_bin, "-y",
                     "-i", input_path,
                     "-c:v", "libx264",
                     "-preset", "fast",
                     "-crf", "23",
-                    "-movflags", "+faststart",  # enables streaming/seeking
-                    "-an",  # no audio track
+                    "-pix_fmt", "yuv420p",        # maximum browser compat
+                    "-movflags", "+faststart",     # enables streaming/seeking
+                    "-an",                         # no audio track
                     temp_path,
                 ],
                 check=True,
@@ -271,8 +283,9 @@ class VideoService:
             )
             # Replace original with h264 version
             os.replace(temp_path, input_path)
-        except Exception:
-            # If ffmpeg fails, keep the original file
+            logger.info("Re-encoded %s to H.264 successfully", input_path)
+        except Exception as e:
+            logger.warning("ffmpeg re-encode failed: %s", e)
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
