@@ -7,6 +7,13 @@ Models used:
 - csrnet_crowd.pth.tar (CSRNet) — crowd density estimation
 - MediaPipe Pose       (optional) — violence / aggression detection
 - MOG2 background subtraction    — abandoned object detection
+
+Performance optimizations:
+- YOLO runs ONCE per frame; results shared between weapon + abandoned object detection
+- All model inferences run in parallel via ThreadPoolExecutor
+- MediaPipe model_complexity=0 (fastest)
+- Lighter optical flow parameters
+- Frame-similarity check to skip unchanged frames
 """
 import cv2
 import numpy as np
@@ -15,6 +22,7 @@ import torch.nn as nn
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from app.config import settings
 from app.models.detection import DetectionType, ThreatLevel
@@ -83,6 +91,13 @@ class DetectionService:
         self.mp_pose = None
         self.bg_subtractor = None      # MOG2
 
+        # Thread pool for parallel model inference (3 = YOLO + CSRNet + MediaPipe)
+        self._inference_pool = ThreadPoolExecutor(max_workers=3)
+
+        # Frame similarity threshold — skip AI if frame barely changed
+        self._prev_frame_gray = None
+        self.similarity_threshold = 0.98  # skip if > 98% similar
+
         self._load_models()
 
     # ==================================================================
@@ -141,11 +156,11 @@ class DetectionService:
             self.mp_pose = mp.solutions.pose
             self.pose_model = self.mp_pose.Pose(
                 static_image_mode=False,
-                model_complexity=1,
+                model_complexity=0,        # 0=fastest (was 1)
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
-            logger.info("MediaPipe Pose model loaded")
+            logger.info("MediaPipe Pose model loaded (complexity=0)")
         except ImportError:
             self.mp_pose = None
             logger.warning("mediapipe not installed — violence/pose detection disabled")
@@ -159,38 +174,164 @@ class DetectionService:
         )
 
     # ==================================================================
-    # 1. Weapon detection  (YOLOv8 — class "Weapons")
+    # Frame similarity check — skip AI on nearly identical frames
     # ==================================================================
-    def detect_weapons(
-        self,
-        frame: np.ndarray,
-        frame_timestamp: datetime,
-    ) -> List[Dict[str, Any]]:
-        """Detect weapons in a frame. Uses higher confidence to avoid false positives."""
+    def is_frame_similar(self, frame: np.ndarray) -> bool:
+        """Return True if frame is very similar to the previous one (skip AI)."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Downscale for fast comparison
+        small = cv2.resize(gray, (160, 120))
+
+        if self._prev_frame_gray is None:
+            self._prev_frame_gray = small
+            return False
+
+        # Structural similarity via normalized correlation
+        score = cv2.matchTemplate(
+            self._prev_frame_gray, small, cv2.TM_CCORR_NORMED
+        )[0][0]
+
+        self._prev_frame_gray = small
+        return score > self.similarity_threshold
+
+    # ==================================================================
+    # Shared YOLO inference — run weapon model ONCE, split results
+    # ==================================================================
+    def run_yolo_shared(
+        self, frame: np.ndarray, conf: float = 0.4
+    ) -> Dict[str, list]:
+        """
+        Run the weapon YOLO model once and split results into categories.
+        Returns {"weapons": [...], "bags_boxes": [...], "all_boxes": [...]}
+        """
         if self.weapon_model is None:
-            return []
+            return {"weapons": [], "bags_boxes": [], "all_boxes": []}
 
         h, w = frame.shape[:2]
-        # Use higher threshold for weapons (0.7) to reduce false positives
-        weapon_conf = max(self.confidence_threshold, 0.7)
-        results = self.weapon_model(frame, conf=weapon_conf, verbose=False)
-        detections: List[Dict[str, Any]] = []
+        results = self.weapon_model(frame, conf=conf, verbose=False)
+
+        weapons = []
+        bags_boxes = []
+        all_boxes = []
 
         for result in results:
             for box in result.boxes:
                 cls_id = int(box.cls[0])
                 cls_name = self.weapon_model.names.get(cls_id, "unknown")
-                # Only flag "Weapons" as weapon detections
-                if cls_name.lower() != "weapons":
-                    continue
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                detections.append({
+                det = {
                     "bbox": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
                     "confidence": float(box.conf[0]),
                     "class": cls_name,
-                })
+                    "pixel_bbox": [x1, y1, x2, y2],
+                }
+                all_boxes.append(det)
 
-        return detections
+                if cls_name.lower() == "weapons":
+                    weapons.append(det)
+                elif cls_name.lower() in ("bags", "box"):
+                    bags_boxes.append(det)
+
+        return {"weapons": weapons, "bags_boxes": bags_boxes, "all_boxes": all_boxes}
+
+    # ==================================================================
+    # Parallel detection — run all enabled modules concurrently
+    # ==================================================================
+    def detect_all_parallel(
+        self,
+        frame: np.ndarray,
+        previous_frames: List[np.ndarray],
+        frame_timestamp: datetime,
+        object_history: Dict[str, List[datetime]],
+        enabled_modules: Dict[str, Dict[str, Any]],
+    ) -> List[tuple]:
+        """
+        Run all enabled detection modules in parallel.
+        Returns list of (DetectionType, detection_dict) tuples.
+        """
+        all_results: List[tuple] = []
+        futures = {}
+
+        # Check frame similarity — skip expensive AI if frame barely changed
+        if self.is_frame_similar(frame):
+            return []
+
+        # Step 1: Run shared YOLO once (needed by weapon + abandoned_object)
+        need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
+        yolo_results = self.run_yolo_shared(frame, conf=0.4) if need_yolo else None
+
+        # Step 2: Submit independent models in parallel
+        if "weapon" in enabled_modules and yolo_results:
+            futures["weapon"] = self._inference_pool.submit(
+                self._extract_weapons, yolo_results
+            )
+
+        if "abandoned_object" in enabled_modules and yolo_results:
+            futures["abandoned_object"] = self._inference_pool.submit(
+                self._extract_abandoned, yolo_results, frame, frame_timestamp, object_history
+            )
+
+        if "mask_face" in enabled_modules:
+            futures["mask_face"] = self._inference_pool.submit(
+                self.detect_mask_face, frame, frame_timestamp
+            )
+
+        if "crowd_density" in enabled_modules:
+            futures["crowd_density"] = self._inference_pool.submit(
+                self.calculate_crowd_density, frame, frame_timestamp
+            )
+
+        if "violence" in enabled_modules:
+            futures["violence"] = self._inference_pool.submit(
+                self.detect_violence, frame, previous_frames, frame_timestamp
+            )
+
+        # Step 3: Collect results
+        for module, future in futures.items():
+            try:
+                result = future.result(timeout=30)
+
+                if module == "weapon":
+                    for det in result:
+                        all_results.append((DetectionType.WEAPON, det))
+                elif module == "abandoned_object":
+                    for det in result:
+                        all_results.append((DetectionType.ABANDONED_OBJECT, det))
+                elif module == "mask_face":
+                    for det in result:
+                        all_results.append((DetectionType.MASK_FACE, det))
+                elif module == "crowd_density":
+                    if result["count"] > 0:
+                        all_results.append((DetectionType.CROWD_DENSITY, result))
+                elif module == "violence":
+                    if result["is_violent"]:
+                        all_results.append((DetectionType.VIOLENCE, result))
+            except Exception as e:
+                logger.warning("Module %s failed: %s", module, e)
+
+        return all_results
+
+    # ==================================================================
+    # 1. Weapon detection — extract from shared YOLO results
+    # ==================================================================
+    def _extract_weapons(self, yolo_results: Dict[str, list]) -> List[Dict[str, Any]]:
+        """Extract weapon detections from shared YOLO results."""
+        weapon_conf = max(self.confidence_threshold, 0.7)
+        return [
+            det for det in yolo_results["weapons"]
+            if det["confidence"] >= weapon_conf
+        ]
+
+    def detect_weapons(
+        self,
+        frame: np.ndarray,
+        frame_timestamp: datetime,
+    ) -> List[Dict[str, Any]]:
+        """Detect weapons in a frame (standalone, for backward compat)."""
+        if self.weapon_model is None:
+            return []
+        results = self.run_yolo_shared(frame)
+        return self._extract_weapons(results)
 
     # ==================================================================
     # 2. Violence / aggression detection  (MediaPipe + optical flow)
@@ -203,9 +344,7 @@ class DetectionService:
     ) -> Dict[str, Any]:
         """
         Detect violent behaviour via pose estimation + temporal motion.
-
-        Uses MediaPipe keypoints and inter-frame optical-flow magnitude.
-        A dedicated LSTM/1D-CNN can replace the heuristic when trained.
+        Optimized: lighter optical flow params, model_complexity=0.
         """
         if self.pose_model is None:
             return {"is_violent": False, "confidence": 0.0, "pose_data": {}}
@@ -223,15 +362,16 @@ class DetectionService:
                 ]
             }
 
-        # Motion magnitude via optical flow
+        # Motion magnitude via optical flow (lighter params)
         motion_score = 0.0
         if previous_frames:
             prev_gray = cv2.cvtColor(previous_frames[-1], cv2.COLOR_BGR2GRAY)
             curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             flow = cv2.calcOpticalFlowFarneback(
                 prev_gray, curr_gray, None,
-                pyr_scale=0.5, levels=3, winsize=15,
-                iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+                pyr_scale=0.5, levels=2, winsize=11,    # was levels=3, winsize=15
+                iterations=2, poly_n=5, poly_sigma=1.1,  # was iterations=3
+                flags=0,
             )
             mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
             motion_score = float(np.mean(mag))
@@ -246,8 +386,43 @@ class DetectionService:
         }
 
     # ==================================================================
-    # 3. Abandoned object detection  (YOLOv8 Bags/Box + MOG2 tracking)
+    # 3. Abandoned object detection — extract from shared YOLO results
     # ==================================================================
+    def _extract_abandoned(
+        self,
+        yolo_results: Dict[str, list],
+        frame: np.ndarray,
+        frame_timestamp: datetime,
+        object_history: Dict[str, List[datetime]],
+    ) -> List[Dict[str, Any]]:
+        """Extract abandoned objects from shared YOLO results (Bags/Box)."""
+        detections: List[Dict[str, Any]] = []
+        h, w = frame.shape[:2]
+
+        for det in yolo_results["bags_boxes"]:
+            pixel_bbox = det["pixel_bbox"]
+            x1, y1, x2, y2 = pixel_bbox
+            cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+            cls_name = det["class"]
+            obj_key = f"{cls_name}_{cx // 40}_{cy // 40}"
+
+            if obj_key not in object_history:
+                object_history[obj_key] = []
+            object_history[obj_key].append(frame_timestamp)
+
+            first_seen = object_history[obj_key][0]
+            duration = (frame_timestamp - first_seen).total_seconds()
+
+            if duration >= self.abandoned_threshold:
+                detections.append({
+                    "bbox": det["bbox"],
+                    "confidence": min(1.0, duration / (self.abandoned_threshold * 2)),
+                    "class": f"abandoned_{cls_name.lower()}",
+                    "duration_seconds": duration,
+                })
+
+        return detections
+
     def detect_abandoned_object(
         self,
         frame: np.ndarray,
@@ -255,47 +430,15 @@ class DetectionService:
         frame_timestamp: datetime,
         object_history: Dict[str, List[datetime]],
     ) -> List[Dict[str, Any]]:
-        """
-        Detect abandoned objects.
-
-        Uses the weapon model's Bags/Box classes to find objects, then
-        tracks how long they remain stationary via MOG2 background
-        subtraction.  Objects stationary > threshold → flagged.
-        """
+        """Detect abandoned objects (standalone, for backward compat)."""
         h, w = frame.shape[:2]
         detections: List[Dict[str, Any]] = []
 
-        # Strategy A: Use YOLO Bags/Box detections for precise object tracking
         if self.weapon_model is not None:
-            results = self.weapon_model(frame, conf=0.4, verbose=False)
-            for result in results:
-                for box in result.boxes:
-                    cls_id = int(box.cls[0])
-                    cls_name = self.weapon_model.names.get(cls_id, "")
-                    if cls_name.lower() not in ("bags", "box"):
-                        continue
+            yolo_results = self.run_yolo_shared(frame)
+            return self._extract_abandoned(yolo_results, frame, frame_timestamp, object_history)
 
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                    obj_key = f"{cls_name}_{cx // 40}_{cy // 40}"
-
-                    if obj_key not in object_history:
-                        object_history[obj_key] = []
-                    object_history[obj_key].append(frame_timestamp)
-
-                    first_seen = object_history[obj_key][0]
-                    duration = (frame_timestamp - first_seen).total_seconds()
-
-                    if duration >= self.abandoned_threshold:
-                        detections.append({
-                            "bbox": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
-                            "confidence": min(1.0, duration / (self.abandoned_threshold * 2)),
-                            "class": f"abandoned_{cls_name.lower()}",
-                            "duration_seconds": duration,
-                        })
-            return detections
-
-        # Strategy B: Fallback to pure MOG2 contour tracking
+        # Fallback: MOG2 contour tracking
         fg_mask = self.bg_subtractor.apply(frame)
         _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
@@ -334,10 +477,7 @@ class DetectionService:
         frame: np.ndarray,
         frame_timestamp: datetime,
     ) -> List[Dict[str, Any]]:
-        """
-        Detect faces and classify as covered or uncovered using the
-        dedicated YOLOv8 face model.
-        """
+        """Detect faces and classify as covered or uncovered."""
         if self.face_model is None:
             return []
 
@@ -369,24 +509,15 @@ class DetectionService:
         frame: np.ndarray,
         frame_timestamp: datetime,
     ) -> Dict[str, Any]:
-        """
-        Estimate crowd count and density using the CSRNet model.
-
-        The model outputs a density map; summing it gives the estimated
-        person count.  Falls back to HOG people detector if CSRNet
-        is unavailable.
-        """
+        """Estimate crowd count and density using CSRNet or HOG fallback."""
         if self.crowd_model is not None:
             try:
-                # Preprocess: resize, normalise, convert to tensor
                 img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = cv2.resize(img, (640, 480))
+                img = cv2.resize(img, (320, 240))  # was 640x480 — 4x fewer pixels
                 img = img.astype(np.float32) / 255.0
-                # Normalise with ImageNet stats
                 mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
                 std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
                 img = (img - mean) / std
-                # HWC → CHW → NCHW
                 tensor = torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0)
 
                 with torch.no_grad():
@@ -406,7 +537,8 @@ class DetectionService:
         # Fallback: HOG people detector
         hog = cv2.HOGDescriptor()
         hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-        boxes, _ = hog.detectMultiScale(frame, winStride=(8, 8), scale=1.05)
+        small = cv2.resize(frame, (320, 240))  # downscale for HOG too
+        boxes, _ = hog.detectMultiScale(small, winStride=(8, 8), scale=1.05)
         person_count = len(boxes)
         density = min(1.0, person_count / 50.0)
 
@@ -436,19 +568,11 @@ class DetectionService:
         metadata: Optional[Dict[str, Any]] = None,
         company_thresholds: Optional[Dict[str, Optional[float]]] = None,
     ) -> ThreatLevel:
-        """
-        Classify threat level based on detection type and confidence.
-
-        If company_thresholds is provided (from CompanyDetectionSettings),
-        it overrides the default thresholds for that module.
-        company_thresholds keys: critical_threshold, high_threshold, medium_threshold
-        """
-        # For crowd density, use the density value instead of raw confidence
+        """Classify threat level based on detection type and confidence."""
         value = confidence
         if detection_type == DetectionType.CROWD_DENSITY:
             value = metadata.get("density", 0.0) if metadata else 0.0
 
-        # Get thresholds — company overrides > defaults
         defaults = self.DEFAULT_THRESHOLDS.get(detection_type, (None, None, None))
         if company_thresholds:
             ct = company_thresholds.get("critical_threshold") or defaults[0]
@@ -470,25 +594,11 @@ class DetectionService:
         db,
         company_id: Optional[int] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        """
-        Return a dict of module_name → settings for modules that are active.
-
-        A module is active only if:
-        1. It is globally enabled (GlobalModuleSettings)
-        2. AND the company has not disabled it (CompanyDetectionSettings)
-
-        Returns dict like:
-        {
-            "weapon": {"critical_threshold": 0.9, "high_threshold": 0.7, ...},
-            "mask_face": {...},
-        }
-        """
+        """Return a dict of module_name → settings for modules that are active."""
         from app.models.detection_settings import GlobalModuleSettings, CompanyDetectionSettings
 
-        # 1. Check global settings
         global_settings = {s.module_name: s.is_enabled for s in db.query(GlobalModuleSettings).all()}
 
-        # 2. Check company settings
         company_settings = {}
         if company_id:
             for cs in db.query(CompanyDetectionSettings).filter(CompanyDetectionSettings.company_id == company_id).all():
@@ -498,16 +608,13 @@ class DetectionService:
         for dt in DetectionType:
             module = dt.value
 
-            # Skip if globally disabled
             if not global_settings.get(module, True):
                 continue
 
-            # Skip if company disabled it
             cs = company_settings.get(module)
             if cs and not cs.is_enabled:
                 continue
 
-            # Build threshold overrides
             thresholds: Dict[str, Any] = {}
             if cs:
                 thresholds["critical_threshold"] = cs.critical_threshold

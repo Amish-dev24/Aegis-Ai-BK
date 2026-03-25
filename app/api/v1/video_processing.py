@@ -211,32 +211,17 @@ def _process_video_sync(job_id: str):
                     # Downscale for AI (faster inference)
                     ai_frame = cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
 
-                    all_raw: list[tuple] = []
                     active_detections = []
 
-                    if "weapon" in enabled_modules:
-                        for det in detection_service.detect_weapons(ai_frame, timestamp):
-                            all_raw.append((DetectionType.WEAPON, det))
+                    # Violence needs previous frames at same scale
+                    ai_prev = []
+                    if "violence" in enabled_modules and previous_frames:
+                        ai_prev = [cv2.resize(f, (ai_width, ai_height)) for f in previous_frames[-3:]] if needs_resize else previous_frames[-3:]
 
-                    if "violence" in enabled_modules:
-                        # Violence needs previous frames at same scale
-                        resized_prev = [cv2.resize(f, (ai_width, ai_height)) for f in previous_frames[-3:]] if needs_resize and previous_frames else previous_frames[-3:]
-                        violence = detection_service.detect_violence(ai_frame, resized_prev, timestamp)
-                        if violence["is_violent"]:
-                            all_raw.append((DetectionType.VIOLENCE, violence))
-
-                    if "abandoned_object" in enabled_modules:
-                        for det in detection_service.detect_abandoned_object(ai_frame, None, timestamp, object_history):
-                            all_raw.append((DetectionType.ABANDONED_OBJECT, det))
-
-                    if "mask_face" in enabled_modules:
-                        for det in detection_service.detect_mask_face(ai_frame, timestamp):
-                            all_raw.append((DetectionType.MASK_FACE, det))
-
-                    if "crowd_density" in enabled_modules:
-                        crowd = detection_service.calculate_crowd_density(ai_frame, timestamp)
-                        if crowd["count"] > 0:
-                            all_raw.append((DetectionType.CROWD_DENSITY, crowd))
+                    # Run all models in parallel (shared YOLO + concurrent inference)
+                    all_raw = detection_service.detect_all_parallel(
+                        ai_frame, ai_prev, timestamp, object_history, enabled_modules
+                    )
 
                     # Persist detections (deduplicated)
                     for det_type, det in all_raw:
