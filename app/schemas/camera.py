@@ -40,7 +40,8 @@ class CameraResponse(CameraBase):
     company_id: int
     is_active: bool
     created_at: datetime
-    
+    updated_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 

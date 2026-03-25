@@ -2,11 +2,11 @@
 Company management endpoints for Aegis AI admins.
 """
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
-from app.core.security import require_aegis_admin, get_current_user
+from app.core.security import require_aegis_admin, require_admin, get_current_user, check_company_access
 from app.schemas.company import (
     CompanyCreate, 
     CompanyResponse, 
@@ -19,7 +19,7 @@ from app.models.user import User, Role
 from app.models.camera import Camera
 from app.models.detection import Detection
 from app.models.alert import Alert
-from app.models.audit_log import AuditLog
+from app.models.audit_log import create_audit_log
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 
@@ -107,16 +107,22 @@ async def get_companies_stats(
 async def get_company(
     company_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_aegis_admin)
+    current_user: User = Depends(require_admin)
 ):
-    """Get company details with user count (Aegis AI admin only)."""
+    """Get company details with user count. Admins can only see their own company."""
+    if not check_company_access(current_user, company_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions to access this company"
+        )
+
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Company not found"
         )
-    
+
     # Count users
     user_count = db.query(func.count(User.id)).filter(User.company_id == company.id).scalar()
     active_user_count = db.query(func.count(User.id)).filter(
@@ -145,9 +151,15 @@ async def get_company(
 async def get_company_users(
     company_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_aegis_admin)
+    current_user: User = Depends(require_admin)
 ):
-    """Get all users for a company (Aegis AI admin only)."""
+    """Get all users for a company. Admins can only see their own company's users."""
+    if not check_company_access(current_user, company_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions to access this company"
+        )
+
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(
@@ -174,6 +186,7 @@ async def get_company_users(
 
 @router.post("", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)
 async def create_company(
+    request: Request,
     company_data: CompanyCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_aegis_admin)
@@ -199,20 +212,18 @@ async def create_company(
     db.refresh(db_company)
     
     # Log creation
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="create_company",
-        resource_type="company",
-        resource_id=db_company.id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "create_company", "company", db_company.id,
+        {"name": db_company.name, "domain": db_company.domain}
+    ))
     db.commit()
-    
+
     return db_company
 
 
 @router.put("/{company_id}", response_model=CompanyResponse)
 async def update_company(
+    request: Request,
     company_id: int,
     company_update: CompanyUpdate,
     db: Session = Depends(get_db),
@@ -235,20 +246,18 @@ async def update_company(
     db.refresh(company)
     
     # Log update
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="update_company",
-        resource_type="company",
-        resource_id=company_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "update_company", "company", company_id,
+        {"updated_fields": list(update_data.keys()), "company_name": company.name}
+    ))
     db.commit()
-    
+
     return company
 
 
 @router.post("/{company_id}/verify", response_model=CompanyResponse)
 async def verify_company(
+    request: Request,
     company_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_aegis_admin)
@@ -266,14 +275,11 @@ async def verify_company(
     db.refresh(company)
     
     # Log verification
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="verify_company",
-        resource_type="company",
-        resource_id=company_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "verify_company", "company", company_id,
+        {"company_name": company.name}
+    ))
     db.commit()
-    
+
     return company
 

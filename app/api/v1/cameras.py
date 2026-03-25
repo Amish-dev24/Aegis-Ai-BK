@@ -2,7 +2,7 @@
 Camera management endpoints.
 """
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import require_security_officer, get_current_user, get_user_company_filter, check_company_access
@@ -10,13 +10,14 @@ from app.models.user import Role
 from app.schemas.camera import CameraCreate, CameraResponse, CameraUpdate
 from app.models.camera import Camera
 from app.models.user import User
-from app.models.audit_log import AuditLog
+from app.models.audit_log import create_audit_log
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
 
 @router.post("", response_model=CameraResponse, status_code=status.HTTP_201_CREATED)
 async def create_camera(
+    request: Request,
     camera_data: CameraCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_security_officer)
@@ -42,15 +43,12 @@ async def create_camera(
     db.refresh(db_camera)
     
     # Log creation
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="create_camera",
-        resource_type="camera",
-        resource_id=db_camera.id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "create_camera", "camera", db_camera.id,
+        {"name": db_camera.name, "location": db_camera.location, "company_id": db_camera.company_id}
+    ))
     db.commit()
-    
+
     return db_camera
 
 
@@ -101,6 +99,7 @@ async def get_camera(
 
 @router.put("/{camera_id}", response_model=CameraResponse)
 async def update_camera(
+    request: Request,
     camera_id: int,
     camera_update: CameraUpdate,
     db: Session = Depends(get_db),
@@ -129,20 +128,18 @@ async def update_camera(
     db.refresh(camera)
     
     # Log update
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="update_camera",
-        resource_type="camera",
-        resource_id=camera_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "update_camera", "camera", camera_id,
+        {"updated_fields": list(update_data.keys()), "camera_name": camera.name}
+    ))
     db.commit()
-    
+
     return camera
 
 
 @router.delete("/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_camera(
+    request: Request,
     camera_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_security_officer)
@@ -163,13 +160,10 @@ async def delete_camera(
         )
     
     # Log deletion
-    audit_log = AuditLog(
-        user_id=current_user.id,
-        action="delete_camera",
-        resource_type="camera",
-        resource_id=camera_id
-    )
-    db.add(audit_log)
+    db.add(create_audit_log(
+        request, current_user.id, "delete_camera", "camera", camera_id,
+        {"camera_name": camera.name, "location": camera.location}
+    ))
     db.delete(camera)
     db.commit()
     
