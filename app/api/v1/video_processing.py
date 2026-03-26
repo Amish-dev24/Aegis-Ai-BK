@@ -3,18 +3,21 @@ Video processing endpoints with progress tracking and annotated video output.
 
 Optimizations:
 - Downscale frames before AI inference (YOLO works at 640px)
-- Skip more frames (process every 30th = 1fps for 30fps video)
+- Skip non-analysis frames entirely (seek instead of decode)
 - Skip annotated video output by default (optional)
 - Batch DB commits
+- Background email sending (non-blocking)
 - Thread pool so event loop stays free
 """
 import asyncio
 import uuid
 import os
 import logging
+import threading
 from typing import Optional
 from datetime import datetime, timedelta
 from pathlib import Path
+from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request, Query
@@ -43,6 +46,50 @@ router = APIRouter(prefix="/video", tags=["video-processing"])
 
 _thread_pool = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# Background email sender — emails must never block the inference loop
+# ---------------------------------------------------------------------------
+_email_queue: Queue = Queue()
+
+
+def _email_worker():
+    """Drain the email queue in a background thread."""
+    while True:
+        try:
+            task = _email_queue.get(timeout=5)
+        except Empty:
+            continue
+        if task is None:          # poison pill
+            break
+        try:
+            sent = asyncio.run(email_service.send_alert_email(**task["kwargs"]))
+            # Update alert record in DB after successful send
+            alert_id = task.get("alert_id")
+            if sent and alert_id:
+                try:
+                    db = SessionLocal()
+                    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+                    if alert:
+                        alert.email_sent = True
+                        alert.email_sent_at = datetime.utcnow()
+                        db.commit()
+                    db.close()
+                except Exception as db_err:
+                    logger.warning("Failed to update alert %s email status: %s", alert_id, db_err)
+        except Exception as e:
+            logger.warning("Background email failed: %s", e)
+
+
+_email_thread: threading.Thread | None = None
+
+
+def _ensure_email_thread():
+    """Start the email worker thread if not already running."""
+    global _email_thread
+    if _email_thread is None or not _email_thread.is_alive():
+        _email_thread = threading.Thread(target=_email_worker, daemon=True, name="email-sender")
+        _email_thread.start()
 
 
 def _get_job(job_id: str) -> dict:
@@ -141,10 +188,139 @@ async def start_video_processing(
 
 
 # ---------------------------------------------------------------------------
+# Per-frame analysis helper (shared by fast + slow path)
+# ---------------------------------------------------------------------------
+def _run_analysis(
+    ai_frame, full_frame, timestamp, previous_frames,
+    object_history, enabled_modules, needs_resize,
+    ai_width, ai_height, last_detection_time, dedup_interval,
+    camera_id, company_id, job, db, pending_db_count,
+) -> list:
+    """Run detection on one frame, persist results. Returns active_detections list."""
+    active_detections = []
+
+    ai_prev = []
+    if "violence" in enabled_modules and previous_frames:
+        ai_prev = (
+            [cv2.resize(f, (ai_width, ai_height)) for f in previous_frames[-3:]]
+            if needs_resize else previous_frames[-3:]
+        )
+
+    all_raw = detection_service.detect_all_parallel(
+        ai_frame, ai_prev, timestamp, object_history, enabled_modules
+    )
+
+    for det_type, det in all_raw:
+        dt_elapsed = (timestamp - last_detection_time.get(det_type, datetime.min)).total_seconds()
+        if dt_elapsed < dedup_interval:
+            continue
+        last_detection_time[det_type] = timestamp
+
+        confidence = det.get("confidence", 0.0)
+        module_settings = enabled_modules.get(det_type.value, {})
+        min_conf = module_settings.get("min_confidence")
+        if min_conf and confidence < min_conf:
+            continue
+
+        threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
+        bbox = det.get("bbox", [0, 0, 0, 0])
+
+        db_detection = Detection(
+            camera_id=camera_id,
+            company_id=company_id,
+            detection_type=det_type,
+            threat_level=threat_level,
+            confidence=confidence,
+            frame_timestamp=timestamp,
+            bbox_x=bbox[0] if len(bbox) > 0 else None,
+            bbox_y=bbox[1] if len(bbox) > 1 else None,
+            bbox_width=bbox[2] if len(bbox) > 2 else None,
+            bbox_height=bbox[3] if len(bbox) > 3 else None,
+            detection_metadata=det,
+        )
+        db.add(db_detection)
+        db.flush()
+
+        label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+        snapshot_path = video_service.save_snapshot(
+            full_frame, db_detection.id, prefix=det_type.value,
+            bbox=bbox, label=label,
+        )
+        db_evidence = Evidence(
+            detection_id=db_detection.id,
+            image_path=snapshot_path,
+            metadata_json=str(det),
+        )
+        db.add(db_evidence)
+        db.flush()
+
+        if threat_level in (ThreatLevel.MEDIUM, ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+            alert = Alert(
+                detection_id=db_detection.id,
+                company_id=company_id,
+                title=f"{det_type.value.replace('_', ' ').title()} – {threat_level.value.upper()}",
+                message=f"{det_type.value} detected with {confidence:.0%} confidence",
+                status=AlertStatus.PENDING,
+            )
+            alert.email_sent_to = job["user_email"]
+            db.add(alert)
+            db.flush()
+
+            # Queue email in background — never block inference
+            _email_queue.put({
+                "alert_id": alert.id,
+                "kwargs": {
+                    "to_emails": [job["user_email"]],
+                    "subject": alert.title,
+                    "message": alert.message,
+                    "snapshot_path": snapshot_path,
+                    "metadata": {
+                        "Detection Type": det_type.value,
+                        "Threat Level": threat_level.value,
+                        "Confidence": f"{confidence:.2%}",
+                        "Camera": job["camera_name"],
+                        "Timestamp": timestamp.isoformat(),
+                    },
+                }
+            })
+
+            job["total_alerts"] += 1
+
+        active_detections.append({
+            "det_type": det_type.value,
+            "confidence": confidence,
+            "bbox": bbox,
+            "class_name": det.get("class", det_type.value),
+        })
+
+        job["detections"].append({
+            "id": db_detection.id,
+            "detection_type": det_type.value,
+            "threat_level": threat_level.value,
+            "confidence": round(confidence, 4),
+            "class": det.get("class", det_type.value),
+            "evidence_id": db_evidence.id,
+            "timestamp": timestamp.isoformat(),
+            "frame_number": job.get("current_frame", 0),
+        })
+        job["total_detections"] += 1
+        pending_db_count += 1
+
+    # Batch commit every 10 detections
+    if pending_db_count >= 10:
+        db.commit()
+        pending_db_count = 0
+
+    job["_pdb"] = pending_db_count
+    return active_detections
+
+
+# ---------------------------------------------------------------------------
 # Sync processing in thread pool
 # ---------------------------------------------------------------------------
 def _process_video_sync(job_id: str):
     """Run detection + optional annotation. Runs in a worker thread."""
+    _ensure_email_thread()
     job = _jobs[job_id]
     db = SessionLocal()
 
@@ -189,168 +365,91 @@ def _process_video_sync(job_id: str):
         ai_height = int(height * scale)
         needs_resize = scale < 1.0
 
-        logger.info("Job %s: %d frames, process every %d (analyze %d), video=%s, resize=%s (%.0f%%)",
-                     job_id, total_frames, process_every_n,
-                     total_frames // process_every_n, generate_video,
-                     needs_resize, scale * 100)
+        analyzed_count = total_frames // process_every_n if process_every_n else total_frames
+        logger.info("Job %s: %d frames, analyze %d (every %d), video=%s, resize=%s (%.0f%%)",
+                     job_id, total_frames, analyzed_count, process_every_n,
+                     generate_video, needs_resize, scale * 100)
+
+        import time as _time
+        t_start = _time.perf_counter()
 
         try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            if generate_video:
+                # ── SLOW PATH: must read every frame for video output ──
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
 
-                frame_index += 1
-                elapsed = timedelta(seconds=frame_index / fps)
-                timestamp = video_start + elapsed
+                    frame_index += 1
+                    elapsed = timedelta(seconds=frame_index / fps)
+                    timestamp = video_start + elapsed
 
-                is_analysis_frame = (frame_index % process_every_n == 0)
+                    if frame_index % process_every_n == 0:
+                        ai_frame = cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
+                        active_detections = _run_analysis(
+                            ai_frame, frame, timestamp, previous_frames,
+                            object_history, enabled_modules, needs_resize,
+                            ai_width, ai_height, last_detection_time, dedup_interval,
+                            camera_id, company_id, job, db, pending_db_count,
+                        )
+                        previous_frames.append(frame)
+                        if len(previous_frames) > 5:
+                            previous_frames.pop(0)
+                        pending_db_count = job.get("_pdb", 0)
 
-                # Run AI on analysis frames
-                if is_analysis_frame:
-                    # Downscale for AI (faster inference)
+                    if writer:
+                        if active_detections:
+                            annotated = video_service.draw_detections_on_frame(frame, active_detections)
+                        else:
+                            annotated = frame
+                        writer.write(annotated)
+
+                    job["current_frame"] = frame_index
+                    job["progress"] = min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
+            else:
+                # ── FAST PATH: seek directly to analysis frames, skip decode ──
+                # This skips reading ~97% of frames (e.g., 3480 out of 3600)
+                analysis_frame_num = 0
+                while analysis_frame_num < total_frames:
+                    analysis_frame_num += process_every_n
+                    if analysis_frame_num >= total_frames:
+                        break
+
+                    # Seek directly — avoids decoding skipped frames
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, analysis_frame_num)
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+
+                    frame_index = analysis_frame_num
+                    elapsed = timedelta(seconds=frame_index / fps)
+                    timestamp = video_start + elapsed
+
                     ai_frame = cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
-
-                    active_detections = []
-
-                    # Violence needs previous frames at same scale
-                    ai_prev = []
-                    if "violence" in enabled_modules and previous_frames:
-                        ai_prev = [cv2.resize(f, (ai_width, ai_height)) for f in previous_frames[-3:]] if needs_resize else previous_frames[-3:]
-
-                    # Run all models in parallel (shared YOLO + concurrent inference)
-                    all_raw = detection_service.detect_all_parallel(
-                        ai_frame, ai_prev, timestamp, object_history, enabled_modules
+                    active_detections = _run_analysis(
+                        ai_frame, frame, timestamp, previous_frames,
+                        object_history, enabled_modules, needs_resize,
+                        ai_width, ai_height, last_detection_time, dedup_interval,
+                        camera_id, company_id, job, db, pending_db_count,
                     )
-
-                    # Persist detections (deduplicated)
-                    for det_type, det in all_raw:
-                        dt_elapsed = (timestamp - last_detection_time.get(det_type, datetime.min)).total_seconds()
-                        if dt_elapsed < dedup_interval:
-                            continue
-                        last_detection_time[det_type] = timestamp
-
-                        confidence = det.get("confidence", 0.0)
-                        module_settings = enabled_modules.get(det_type.value, {})
-                        min_conf = module_settings.get("min_confidence")
-                        if min_conf and confidence < min_conf:
-                            continue
-
-                        threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
-                        bbox = det.get("bbox", [0, 0, 0, 0])
-
-                        db_detection = Detection(
-                            camera_id=camera_id,
-                            company_id=company_id,
-                            detection_type=det_type,
-                            threat_level=threat_level,
-                            confidence=confidence,
-                            frame_timestamp=timestamp,
-                            bbox_x=bbox[0] if len(bbox) > 0 else None,
-                            bbox_y=bbox[1] if len(bbox) > 1 else None,
-                            bbox_width=bbox[2] if len(bbox) > 2 else None,
-                            bbox_height=bbox[3] if len(bbox) > 3 else None,
-                            detection_metadata=det,
-                        )
-                        db.add(db_detection)
-                        db.flush()
-
-                        # Save snapshot using original full-res frame
-                        label = f"{det.get('class', det_type.value)} {confidence:.0%}"
-                        snapshot_path = video_service.save_snapshot(
-                            frame, db_detection.id, prefix=det_type.value,
-                            bbox=bbox, label=label,
-                        )
-                        db_evidence = Evidence(
-                            detection_id=db_detection.id,
-                            image_path=snapshot_path,
-                            metadata_json=str(det),
-                        )
-                        db.add(db_evidence)
-                        db.flush()
-
-                        if threat_level in (ThreatLevel.MEDIUM, ThreatLevel.HIGH, ThreatLevel.CRITICAL):
-                            alert = Alert(
-                                detection_id=db_detection.id,
-                                company_id=company_id,
-                                title=f"{det_type.value.replace('_', ' ').title()} – {threat_level.value.upper()}",
-                                message=f"{det_type.value} detected with {confidence:.0%} confidence",
-                                status=AlertStatus.PENDING,
-                            )
-                            alert.email_sent_to = job["user_email"]
-                            db.add(alert)
-                            db.flush()
-
-                            # Send email from sync thread
-                            try:
-                                import asyncio as _aio
-                                sent = _aio.run(email_service.send_alert_email(
-                                    to_emails=[job["user_email"]],
-                                    subject=alert.title,
-                                    message=alert.message,
-                                    snapshot_path=snapshot_path,
-                                    metadata={
-                                        "Detection Type": det_type.value,
-                                        "Threat Level": threat_level.value,
-                                        "Confidence": f"{confidence:.2%}",
-                                        "Camera": job["camera_name"],
-                                        "Timestamp": timestamp.isoformat(),
-                                    },
-                                ))
-                                if sent:
-                                    alert.email_sent = True
-                                    alert.email_sent_at = datetime.utcnow()
-                            except Exception as email_err:
-                                logger.warning("Email failed for alert %s: %s", alert.id, email_err)
-
-                            job["total_alerts"] += 1
-
-                        active_detections.append({
-                            "det_type": det_type.value,
-                            "confidence": confidence,
-                            "bbox": bbox,
-                            "class_name": det.get("class", det_type.value),
-                        })
-
-                        job["detections"].append({
-                            "id": db_detection.id,
-                            "detection_type": det_type.value,
-                            "threat_level": threat_level.value,
-                            "confidence": round(confidence, 4),
-                            "class": det.get("class", det_type.value),
-                            "evidence_id": db_evidence.id,
-                            "timestamp": timestamp.isoformat(),
-                            "frame_number": frame_index,
-                        })
-                        job["total_detections"] += 1
-                        pending_db_count += 1
-
-                    # Keep sliding window (only store every Nth for memory)
                     previous_frames.append(frame)
                     if len(previous_frames) > 5:
                         previous_frames.pop(0)
+                    pending_db_count = job.get("_pdb", 0)
 
-                    # Batch commit every 10 detections
-                    if pending_db_count >= 10:
-                        db.commit()
-                        pending_db_count = 0
-
-                # Write annotated video frame (only if requested)
-                if writer:
-                    if active_detections:
-                        annotated = video_service.draw_detections_on_frame(frame, active_detections)
-                    else:
-                        annotated = frame
-                    writer.write(annotated)
-
-                # Update progress
-                job["current_frame"] = frame_index
-                job["progress"] = min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
+                    job["current_frame"] = frame_index
+                    job["progress"] = min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
 
         finally:
             cap.release()
             if writer:
                 writer.release()
+
+        t_elapsed = _time.perf_counter() - t_start
+        logger.info("Job %s: inference loop took %.1fs (%.2fs/frame)",
+                     job_id, t_elapsed,
+                     t_elapsed / max(analyzed_count, 1))
 
         # Final commit
         if pending_db_count > 0:

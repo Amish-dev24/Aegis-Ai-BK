@@ -9,12 +9,14 @@ Models used:
 - MOG2 background subtraction    — abandoned object detection
 
 Performance optimizations:
+- ONNX Runtime for all models (2-4x faster than PyTorch on CPU)
 - YOLO runs ONCE per frame; results shared between weapon + abandoned object detection
 - All model inferences run in parallel via ThreadPoolExecutor
 - MediaPipe model_complexity=0 (fastest)
 - Lighter optical flow parameters
 - Frame-similarity check to skip unchanged frames
 """
+import os
 import cv2
 import numpy as np
 import torch
@@ -28,6 +30,23 @@ from app.config import settings
 from app.models.detection import DetectionType, ThreatLevel
 
 logger = logging.getLogger(__name__)
+
+# Try to import ONNX Runtime — falls back to PyTorch if unavailable
+try:
+    import onnxruntime as ort
+    ORT_AVAILABLE = True
+    # Optimize thread count for CPU — use physical cores (not hyperthreads)
+    cpu_cores = os.cpu_count() or 4
+    ort.set_default_logger_severity(3)  # suppress verbose logs
+    logger.info("ONNX Runtime available — using accelerated inference (%d CPU threads)", cpu_cores)
+except ImportError:
+    ORT_AVAILABLE = False
+    logger.warning("onnxruntime not installed — using PyTorch (slower). Install with: pip install onnxruntime")
+
+# Optimize PyTorch CPU threads (for CSRNet fallback)
+cpu_cores = os.cpu_count() or 4
+torch.set_num_threads(cpu_cores)
+torch.set_num_interop_threads(max(1, cpu_cores // 2))
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +105,8 @@ class DetectionService:
         # Model references (populated by _load_models)
         self.weapon_model = None       # YOLOv8 — Bags / Box / Weapons
         self.face_model = None         # YOLOv8 — covered / uncovered
-        self.crowd_model = None        # CSRNet
+        self.crowd_model = None        # CSRNet (or "onnx" sentinel when using ONNX)
+        self.crowd_onnx_session = None # ONNX Runtime session for CSRNet
         self.pose_model = None         # MediaPipe Pose
         self.mp_pose = None
         self.bg_subtractor = None      # MOG2
@@ -103,50 +123,133 @@ class DetectionService:
     # ==================================================================
     # Model loading
     # ==================================================================
+    def _load_yolo_onnx(self, pt_path: Path, model_name: str):
+        """
+        Load a YOLO model. If ONNX Runtime is available, export to ONNX
+        on first run and load the ONNX version (2-4x faster on CPU).
+        Falls back to PyTorch if onnxruntime is not installed.
+        """
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            logger.warning("ultralytics not installed — %s detection disabled", model_name)
+            return None
+
+        onnx_path = pt_path.with_suffix(".onnx")
+
+        if ORT_AVAILABLE and onnx_path.exists():
+            # ONNX already exported — load directly (fast startup)
+            try:
+                model = YOLO(str(onnx_path), task="detect")
+                logger.info("%s loaded from ONNX: %s — classes: %s", model_name, onnx_path, model.names)
+                return model
+            except Exception as e:
+                logger.warning("Failed to load ONNX %s, falling back to PyTorch: %s", model_name, e)
+
+        if ORT_AVAILABLE and not onnx_path.exists():
+            # Export .pt → .onnx (one-time, takes ~30s)
+            try:
+                logger.info("Exporting %s to ONNX (one-time operation)...", model_name)
+                temp_model = YOLO(str(pt_path))
+                temp_model.export(format="onnx", opset=17, simplify=True)
+                logger.info("ONNX export complete: %s", onnx_path)
+                # Load the exported ONNX model
+                model = YOLO(str(onnx_path), task="detect")
+                logger.info("%s loaded from ONNX: %s — classes: %s", model_name, onnx_path, model.names)
+                return model
+            except Exception as e:
+                logger.warning("ONNX export failed for %s, using PyTorch: %s", model_name, e)
+
+        # Fallback: plain PyTorch
+        try:
+            model = YOLO(str(pt_path))
+            logger.info("%s loaded from PyTorch: %s — classes: %s", model_name, pt_path, model.names)
+            return model
+        except Exception as e:
+            logger.error("Failed to load %s: %s", model_name, e)
+            return None
+
+    def _load_csrnet_onnx(self, crowd_path: Path):
+        """
+        Load CSRNet. If ONNX Runtime is available, export to ONNX on
+        first run and use ort.InferenceSession (2-4x faster on CPU).
+        """
+        onnx_path = crowd_path.with_suffix(".onnx")
+
+        # Try loading existing ONNX session
+        if ORT_AVAILABLE and onnx_path.exists():
+            try:
+                session = ort.InferenceSession(
+                    str(onnx_path),
+                    providers=["CPUExecutionProvider"],
+                )
+                self.crowd_onnx_session = session
+                self.crowd_model = "onnx"  # sentinel to indicate ONNX mode
+                logger.info("CSRNet loaded from ONNX: %s", onnx_path)
+                return
+            except Exception as e:
+                logger.warning("Failed to load CSRNet ONNX, falling back to PyTorch: %s", e)
+
+        # Load PyTorch model (needed for fallback or export)
+        try:
+            pt_model = CSRNet()
+            checkpoint = torch.load(str(crowd_path), map_location="cpu", weights_only=False)
+            pt_model.load_state_dict(checkpoint["model_state"])
+            pt_model.eval()
+            logger.info("CSRNet loaded from PyTorch: %s (epoch %s, MAE %.2f)",
+                        crowd_path, checkpoint.get("epoch"), checkpoint.get("best_mae", 0))
+        except Exception as e:
+            self.crowd_model = None
+            logger.error("Failed to load CSRNet: %s", e)
+            return
+
+        # Export to ONNX if runtime is available
+        if ORT_AVAILABLE and not onnx_path.exists():
+            try:
+                logger.info("Exporting CSRNet to ONNX (one-time operation)...")
+                dummy = torch.randn(1, 3, 384, 512)
+                torch.onnx.export(
+                    pt_model, dummy, str(onnx_path),
+                    opset_version=17,
+                    input_names=["input"],
+                    output_names=["density_map"],
+                    dynamic_axes={"input": {2: "height", 3: "width"}},
+                )
+                session = ort.InferenceSession(
+                    str(onnx_path),
+                    providers=["CPUExecutionProvider"],
+                )
+                self.crowd_onnx_session = session
+                self.crowd_model = "onnx"
+                logger.info("CSRNet ONNX export complete: %s", onnx_path)
+                return
+            except Exception as e:
+                logger.warning("CSRNet ONNX export failed, using PyTorch: %s", e)
+
+        # Fallback: keep PyTorch model
+        self.crowd_model = pt_model
+
     def _load_models(self):
         """Load all detection models. Each one degrades gracefully."""
 
         # --- 1. YOLOv8 weapon / object model (Bags, Box, Weapons) ---
         weapon_path = Path(settings.MODEL_PATH)
         if weapon_path.exists():
-            try:
-                from ultralytics import YOLO
-                self.weapon_model = YOLO(str(weapon_path))
-                logger.info("Weapon model loaded from %s — classes: %s", weapon_path, self.weapon_model.names)
-            except ImportError:
-                logger.warning("ultralytics not installed — weapon detection disabled")
-            except Exception as e:
-                logger.error("Failed to load weapon model: %s", e)
+            self.weapon_model = self._load_yolo_onnx(weapon_path, "Weapon")
         else:
             logger.warning("Weapon model not found at %s — weapon detection disabled", weapon_path)
 
         # --- 2. YOLOv8 face model (covered / uncovered) ---
         face_path = Path(settings.FACE_MODEL_PATH)
         if face_path.exists():
-            try:
-                from ultralytics import YOLO
-                self.face_model = YOLO(str(face_path))
-                logger.info("Face model loaded from %s — classes: %s", face_path, self.face_model.names)
-            except ImportError:
-                logger.warning("ultralytics not installed — face detection disabled")
-            except Exception as e:
-                logger.error("Failed to load face model: %s", e)
+            self.face_model = self._load_yolo_onnx(face_path, "Face")
         else:
             logger.warning("Face model not found at %s — face detection disabled", face_path)
 
         # --- 3. CSRNet crowd density model ---
         crowd_path = Path(settings.CROWD_MODEL_PATH)
         if crowd_path.exists():
-            try:
-                self.crowd_model = CSRNet()
-                checkpoint = torch.load(str(crowd_path), map_location="cpu", weights_only=False)
-                self.crowd_model.load_state_dict(checkpoint["model_state"])
-                self.crowd_model.eval()
-                logger.info("CSRNet crowd model loaded from %s (epoch %s, MAE %.2f)",
-                            crowd_path, checkpoint.get("epoch"), checkpoint.get("best_mae", 0))
-            except Exception as e:
-                self.crowd_model = None
-                logger.error("Failed to load CSRNet model: %s", e)
+            self._load_csrnet_onnx(crowd_path)
         else:
             logger.warning("CSRNet model not found at %s — crowd density disabled", crowd_path)
 
@@ -512,18 +615,38 @@ class DetectionService:
         """Estimate crowd count and density using CSRNet or HOG fallback."""
         if self.crowd_model is not None:
             try:
-                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = cv2.resize(img, (320, 240))  # was 640x480 — 4x fewer pixels
-                img = img.astype(np.float32) / 255.0
-                mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-                std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-                img = (img - mean) / std
-                tensor = torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0)
+                # Preprocessing must match training pipeline exactly
+                # (see E:\CSRNet-pytorch\video_inference.py — preprocess_frame)
+                from PIL import Image
+                from torchvision import transforms
 
-                with torch.no_grad():
-                    density_map = self.crowd_model(tensor)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(frame_rgb)
+                pil_img = pil_img.resize((512, 384), Image.BILINEAR)
 
-                person_count = max(0, int(density_map.sum().item()))
+                transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225],
+                    ),
+                ])
+                input_tensor = transform(pil_img).unsqueeze(0)  # (1, 3, 384, 512)
+                input_array = input_tensor.numpy()
+
+                # Use ONNX Runtime if available (2-4x faster on CPU)
+                if self.crowd_onnx_session is not None:
+                    outputs = self.crowd_onnx_session.run(
+                        None, {"input": input_array}
+                    )
+                    density_sum = float(outputs[0].sum())
+                else:
+                    # Fallback: PyTorch
+                    with torch.no_grad():
+                        density_map = self.crowd_model(input_tensor)
+                    density_sum = float(density_map.sum().item())
+
+                person_count = max(0, int(density_sum))
                 density = min(1.0, person_count / 50.0)
 
                 return {
