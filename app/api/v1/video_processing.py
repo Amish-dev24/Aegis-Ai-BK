@@ -137,6 +137,10 @@ async def start_video_processing(
     job_id = uuid.uuid4().hex
     output_filename = f"processed_{job_id}.mp4"
     output_path = Path(settings.PROCESSED_VIDEO_DIR) / output_filename
+    
+    # Heatmap video output (for crowd density visualization)
+    heatmap_filename = f"heatmap_{job_id}.mp4"
+    heatmap_path = Path(settings.PROCESSED_VIDEO_DIR) / heatmap_filename
 
     # Calculate process_every_n from desired fps
     video_fps = info["fps"] or 30.0
@@ -155,6 +159,8 @@ async def start_video_processing(
         "detections": [],
         "output_video": str(output_path),
         "output_video_url": None,
+        "heatmap_video": str(heatmap_path),
+        "heatmap_video_url": None,
         "started_at": datetime.utcnow().isoformat(),
         "completed_at": None,
         "error": None,
@@ -195,9 +201,10 @@ def _run_analysis(
     object_history, enabled_modules, needs_resize,
     ai_width, ai_height, last_detection_time, dedup_interval,
     camera_id, company_id, job, db, pending_db_count,
-) -> list:
-    """Run detection on one frame, persist results. Returns active_detections list."""
+) -> tuple:
+    """Run detection on one frame, persist results. Returns (active_detections, heatmap_overlay)."""
     active_detections = []
+    heatmap_overlay = None
 
     ai_prev = []
     if "violence" in enabled_modules and previous_frames:
@@ -212,7 +219,9 @@ def _run_analysis(
 
     for det_type, det in all_raw:
         dt_elapsed = (timestamp - last_detection_time.get(det_type, datetime.min)).total_seconds()
-        if dt_elapsed < dedup_interval:
+        
+        # Skip dedup for crowd_density — process every frame
+        if det_type != DetectionType.CROWD_DENSITY and dt_elapsed < dedup_interval:
             continue
         last_detection_time[det_type] = timestamp
 
@@ -225,6 +234,12 @@ def _run_analysis(
         threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
         bbox = det.get("bbox", [0, 0, 0, 0])
 
+        # Extract density map for heatmap generation (before saving to DB)
+        density_map_normalized = det.get("density_map_normalized")
+        
+        # Remove non-JSON-serializable fields before saving to database
+        det_for_db = {k: v for k, v in det.items() if k != "density_map_normalized"}
+
         db_detection = Detection(
             camera_id=camera_id,
             company_id=company_id,
@@ -236,10 +251,18 @@ def _run_analysis(
             bbox_y=bbox[1] if len(bbox) > 1 else None,
             bbox_width=bbox[2] if len(bbox) > 2 else None,
             bbox_height=bbox[3] if len(bbox) > 3 else None,
-            detection_metadata=det,
+            detection_metadata=det_for_db,
         )
         db.add(db_detection)
         db.flush()
+
+        # Capture heatmap for crowd density detections (use extracted density map)
+        if det_type == DetectionType.CROWD_DENSITY and density_map_normalized is not None:
+            heatmap_overlay = video_service.generate_crowd_heatmap(
+                full_frame, density_map_normalized, 
+                count=det_for_db.get("count", 0),
+                density=det_for_db.get("density", 0.0)
+            )
 
         label = f"{det.get('class', det_type.value)} {confidence:.0%}"
         snapshot_path = video_service.save_snapshot(
@@ -312,7 +335,7 @@ def _run_analysis(
         pending_db_count = 0
 
     job["_pdb"] = pending_db_count
-    return active_detections
+    return active_detections, heatmap_overlay
 
 
 # ---------------------------------------------------------------------------
@@ -339,15 +362,20 @@ def _process_video_sync(job_id: str):
 
         cap = cv2.VideoCapture(upload_path)
 
-        # Only create video writer if requested
+        # Create video writers upfront
         writer = None
+        heatmap_writer = None
         if generate_video:
             writer = video_service.create_video_writer(output_path, fps, width, height)
+            # Always create heatmap writer (will write every frame)
+            heatmap_writer = video_service.create_video_writer(job["heatmap_video"], fps, width, height)
 
         previous_frames: list = []
         object_history: dict = {}
         last_detection_time: dict = {}
-        dedup_interval = 2.0
+        # Dedup interval per detection type — same threat within this window
+        # is considered part of the same event (avoids alert flooding)
+        dedup_interval = 30.0  # seconds — one alert per 30s per threat type
         frame_index = 0
 
         camera_id = job["camera_id"]
@@ -355,6 +383,7 @@ def _process_video_sync(job_id: str):
 
         enabled_modules = detection_service.get_enabled_modules(db, company_id)
         active_detections: list = []
+        heatmap_overlay: Optional[np.ndarray] = None
         video_start = datetime.now()
         pending_db_count = 0
 
@@ -387,7 +416,7 @@ def _process_video_sync(job_id: str):
 
                     if frame_index % process_every_n == 0:
                         ai_frame = cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
-                        active_detections = _run_analysis(
+                        active_detections, heatmap_overlay = _run_analysis(
                             ai_frame, frame, timestamp, previous_frames,
                             object_history, enabled_modules, needs_resize,
                             ai_width, ai_height, last_detection_time, dedup_interval,
@@ -400,10 +429,24 @@ def _process_video_sync(job_id: str):
 
                     if writer:
                         if active_detections:
-                            annotated = video_service.draw_detections_on_frame(frame, active_detections)
+                            annotated = video_service.draw_detections_on_frame(
+                                frame, active_detections, heatmap_overlay=heatmap_overlay
+                            )
                         else:
                             annotated = frame
+                            # Still apply heatmap if available (even without other detections)
+                            if heatmap_overlay is not None:
+                                annotated = cv2.addWeighted(annotated, 0.6, heatmap_overlay, 0.4, 0)
                         writer.write(annotated)
+                        
+                        # Write heatmap video for every frame (persist last heatmap for non-analyzed frames)
+                        if heatmap_writer is not None:
+                            if heatmap_overlay is not None:
+                                heatmap_frame = cv2.addWeighted(frame, 0.6, heatmap_overlay, 0.4, 0)
+                            else:
+                                # Write plain frame if no heatmap available yet
+                                heatmap_frame = frame
+                            heatmap_writer.write(heatmap_frame)
 
                     job["current_frame"] = frame_index
                     job["progress"] = min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
@@ -427,7 +470,7 @@ def _process_video_sync(job_id: str):
                     timestamp = video_start + elapsed
 
                     ai_frame = cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
-                    active_detections = _run_analysis(
+                    active_detections, heatmap_overlay = _run_analysis(
                         ai_frame, frame, timestamp, previous_frames,
                         object_history, enabled_modules, needs_resize,
                         ai_width, ai_height, last_detection_time, dedup_interval,
@@ -445,6 +488,8 @@ def _process_video_sync(job_id: str):
             cap.release()
             if writer:
                 writer.release()
+            if heatmap_writer:
+                heatmap_writer.release()
 
         t_elapsed = _time.perf_counter() - t_start
         logger.info("Job %s: inference loop took %.1fs (%.2fs/frame)",
@@ -459,6 +504,12 @@ def _process_video_sync(job_id: str):
         if generate_video and Path(output_path).exists():
             video_service.reencode_to_h264(output_path)
             job["output_video_url"] = f"/api/v1/video/jobs/{job_id}/result"
+        
+        # Re-encode heatmap video if it was generated
+        heatmap_file = Path(job["heatmap_video"])
+        if heatmap_file.exists():
+            video_service.reencode_to_h264(str(heatmap_file))
+            job["heatmap_video_url"] = f"/api/v1/video/jobs/{job_id}/heatmap"
 
         job["status"] = "completed"
         job["progress"] = 100
@@ -502,6 +553,7 @@ async def get_job_status(
         "total_alerts": job["total_alerts"],
         "detections": job["detections"],
         "output_video_url": job["output_video_url"],
+        "heatmap_video_url": job["heatmap_video_url"],
         "started_at": job["started_at"],
         "completed_at": job["completed_at"],
         "error": job["error"],
@@ -538,6 +590,7 @@ async def stream_progress(
             if job["status"] in ("completed", "failed"):
                 if job["status"] == "completed":
                     payload["output_video_url"] = job["output_video_url"]
+                    payload["heatmap_video_url"] = job["heatmap_video_url"]
                 else:
                     payload["error"] = job["error"]
                 yield f"data: {json.dumps(payload)}\n\n"
@@ -614,6 +667,34 @@ async def download_processed_video(
 
 
 # ---------------------------------------------------------------------------
+# GET /video/jobs/{job_id}/heatmap
+# ---------------------------------------------------------------------------
+@router.get("/jobs/{job_id}/heatmap")
+async def download_heatmap_video(
+    job_id: str,
+    current_user: User = Depends(require_any_authenticated),
+):
+    """Download the crowd density heatmap visualization video."""
+    job = _get_job(job_id)
+
+    if job["status"] != "completed":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}")
+
+    if not job.get("heatmap_video_url"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No heatmap generated. Crowd density detection may be disabled.")
+
+    file_path = Path(job["heatmap_video"])
+    if not file_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Heatmap file not found")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=f"heatmap_{job['filename']}",
+        media_type="video/mp4",
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /video/jobs
 # ---------------------------------------------------------------------------
 @router.get("/jobs")
@@ -645,6 +726,7 @@ async def list_jobs(
             "started_at": job["started_at"],
             "completed_at": job["completed_at"],
             "output_video_url": job["output_video_url"],
+            "heatmap_video_url": job["heatmap_video_url"],
         })
 
     return results
