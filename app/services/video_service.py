@@ -186,20 +186,33 @@ class VideoService:
         return info
 
     def draw_detections_on_frame(
-        self, frame: np.ndarray, detections: list
+        self, frame: np.ndarray, detections: list, heatmap_overlay: Optional[np.ndarray] = None
     ) -> np.ndarray:
         """
-        Draw bounding boxes and labels on a frame.
+        Draw bounding boxes and labels on a frame. Optionally overlay crowd density heatmap.
 
         Args:
             detections: list of dicts with keys:
                 det_type (str), confidence (float), bbox [x,y,w,h] normalized,
                 class_name (str, optional)
+            heatmap_overlay: optional (height, width, 3) BGR density heatmap to blend
         """
         annotated = frame.copy()
         h, w = annotated.shape[:2]
 
+        # Apply heatmap overlay first (if crowd density detection exists)
+        if heatmap_overlay is not None and heatmap_overlay.shape[:2] == (h, w):
+            # Blend heatmap (0.4) with original frame (0.6)
+            annotated = cv2.addWeighted(annotated, 0.6, heatmap_overlay, 0.4, 0)
+
+        # Draw bounding boxes for non-crowd detections
         for det in detections:
+            det_type = det.get("det_type", "")
+            
+            # Skip crowd_density — we already drew the heatmap
+            if det_type == "crowd_density":
+                continue
+
             bbox = det.get("bbox", [])
             if not bbox or len(bbox) < 4:
                 continue
@@ -209,7 +222,6 @@ class VideoService:
             x2 = int((bbox[0] + bbox[2]) * w)
             y2 = int((bbox[1] + bbox[3]) * h)
 
-            det_type = det.get("det_type", "")
             color = self.DETECTION_COLORS.get(det_type, (0, 255, 0))
             confidence = det.get("confidence", 0)
             class_name = det.get("class_name", det_type.replace("_", " ").title())
@@ -235,6 +247,55 @@ class VideoService:
             cv2.line(annotated, (center_x, y2), (center_x, h), color, 1, cv2.LINE_AA)
 
         return annotated
+
+    def generate_crowd_heatmap(
+        self, frame: np.ndarray, density_map_normalized: Optional[np.ndarray],
+        count: int = 0, density: float = 0.0
+    ) -> Optional[np.ndarray]:
+        """
+        Generate a crowd density heatmap overlay from normalized density map.
+        
+        Args:
+            frame: original frame (for resizing density map)
+            density_map_normalized: (height, width) normalized density map (0-255)
+            count: person count to display
+            density: density ratio to display
+        
+        Returns:
+            (frame_h, frame_w, 3) BGR heatmap overlay or None if input invalid
+        """
+        if density_map_normalized is None:
+            return None
+        
+        h, w = frame.shape[:2]
+        
+        # Resize density map to match frame size
+        if density_map_normalized.shape != (h, w):
+            density_resized = cv2.resize(
+                density_map_normalized, (w, h), interpolation=cv2.INTER_CUBIC
+            )
+        else:
+            density_resized = density_map_normalized
+        
+        # Apply colormap (HOT = blue→red, like CSRNet visualization)
+        heatmap_colored = cv2.applyColorMap(density_resized, cv2.COLORMAP_HOT)
+        
+        # Add text overlay with crowd count and density percentage
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.2
+        thickness = 2
+        color = (255, 255, 255)  # White text
+        
+        # Count label
+        count_text = f"People: {count}"
+        cv2.putText(heatmap_colored, count_text, (20, 50), font, font_scale, color, thickness)
+        
+        # Density percentage label
+        density_percent = min(100, int(density * 100))
+        density_text = f"Density: {density_percent}%"
+        cv2.putText(heatmap_colored, density_text, (20, 100), font, font_scale, color, thickness)
+        
+        return heatmap_colored
 
     def create_video_writer(self, output_path: str, fps: float, width: int, height: int):
         """Create a VideoWriter for the output annotated video."""

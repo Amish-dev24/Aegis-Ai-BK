@@ -109,6 +109,7 @@ class DetectionService:
         self.crowd_onnx_session = None # ONNX Runtime session for CSRNet
         self.pose_model = None         # MediaPipe Pose
         self.mp_pose = None
+        self.violence_onnx_session = None  # Conv3D violence classifier (ONNX)
         self.bg_subtractor = None      # MOG2
 
         # Thread pool for parallel model inference (3 = YOLO + CSRNet + MediaPipe)
@@ -253,23 +254,58 @@ class DetectionService:
         else:
             logger.warning("CSRNet model not found at %s — crowd density disabled", crowd_path)
 
-        # --- 4. MediaPipe pose estimation (for violence detection) ---
+        # --- 4. Conv3D Violence classifier (trained on Real Life Violence dataset) ---
+        violence_onnx_path = Path("./models/violence_model.onnx")
+        violence_pt_path = Path("./models/violence_model.pt")
+        if ORT_AVAILABLE and violence_onnx_path.exists():
+            try:
+                self.violence_onnx_session = ort.InferenceSession(
+                    str(violence_onnx_path), providers=["CPUExecutionProvider"],
+                )
+                logger.info("Violence model loaded from ONNX: %s", violence_onnx_path)
+            except Exception as e:
+                logger.warning("Failed to load violence ONNX: %s", e)
+        elif violence_pt_path.exists():
+            try:
+                # Export to ONNX on first run
+                from app.services.violence_model import ViolenceClassifier as VC
+                vc = VC()
+                ckpt = torch.load(str(violence_pt_path), map_location="cpu", weights_only=False)
+                vc.load_state_dict(ckpt["model_state"])
+                vc.eval()
+                logger.info("Violence model loaded from PyTorch (acc: %.1f%%)", ckpt.get("val_acc", 0))
+
+                if ORT_AVAILABLE:
+                    logger.info("Exporting violence model to ONNX...")
+                    dummy = torch.randn(1, 3, 16, 64, 64)
+                    torch.onnx.export(vc, dummy, str(violence_onnx_path), opset_version=18,
+                                      input_names=["video_clip"], output_names=["prediction"],
+                                      dynamic_axes={"video_clip": {0: "batch"}}, dynamo=False)
+                    self.violence_onnx_session = ort.InferenceSession(
+                        str(violence_onnx_path), providers=["CPUExecutionProvider"],
+                    )
+                    logger.info("Violence ONNX export complete: %s", violence_onnx_path)
+                else:
+                    # Keep PyTorch model as fallback
+                    self.pose_model = vc
+            except Exception as e:
+                logger.error("Failed to load violence model: %s", e)
+        else:
+            logger.warning("Violence model not found at %s — violence detection disabled", violence_pt_path)
+
+        # Also try MediaPipe as supplementary (optional)
         try:
             import mediapipe as mp
             self.mp_pose = mp.solutions.pose
             self.pose_model = self.mp_pose.Pose(
-                static_image_mode=False,
-                model_complexity=0,        # 0=fastest (was 1)
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
+                static_image_mode=False, model_complexity=0,
+                min_detection_confidence=0.5, min_tracking_confidence=0.5,
             )
-            logger.info("MediaPipe Pose model loaded (complexity=0)")
+            logger.info("MediaPipe Pose also loaded (supplementary)")
         except ImportError:
             self.mp_pose = None
-            logger.warning("mediapipe not installed — violence/pose detection disabled")
-        except Exception as e:
+        except Exception:
             self.mp_pose = None
-            logger.error("Failed to load MediaPipe Pose: %s", e)
 
         # --- 5. MOG2 background subtractor (abandoned object detection) ---
         self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
@@ -437,7 +473,7 @@ class DetectionService:
         return self._extract_weapons(results)
 
     # ==================================================================
-    # 2. Violence / aggression detection  (MediaPipe + optical flow)
+    # 2. Violence / aggression detection  (Conv3D trained model)
     # ==================================================================
     def detect_violence(
         self,
@@ -446,34 +482,69 @@ class DetectionService:
         frame_timestamp: datetime,
     ) -> Dict[str, Any]:
         """
-        Detect violent behaviour via pose estimation + temporal motion.
-        Optimized: lighter optical flow params, model_complexity=0.
+        Detect violent behaviour using trained Conv3D classifier.
+        Uses 16 frames (current + previous) resized to 64x64.
+        Model trained on Real Life Violence Situations Dataset (~89.8% accuracy).
+        Falls back to optical flow if Conv3D model not available.
         """
-        if self.pose_model is None:
-            return {"is_violent": False, "confidence": 0.0, "pose_data": {}}
+        # ── Primary: Conv3D trained model ──
+        if self.violence_onnx_session is not None or (
+            self.pose_model is not None and hasattr(self.pose_model, 'features')
+        ):
+            # Build a clip of 16 frames from previous_frames + current frame
+            clip_frames = list(previous_frames[-15:]) + [frame]  # up to 16 frames
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = self.pose_model.process(rgb)
+            # Pad with duplicates if we don't have 16 frames yet
+            while len(clip_frames) < 16:
+                clip_frames.insert(0, clip_frames[0])
+            clip_frames = clip_frames[-16:]  # exactly 16
 
-        pose_data: Dict[str, Any] = {}
-        if result.pose_landmarks:
-            landmarks = result.pose_landmarks.landmark
-            pose_data = {
-                "landmarks": [
-                    {"x": lm.x, "y": lm.y, "z": lm.z, "visibility": lm.visibility}
-                    for lm in landmarks
-                ]
-            }
+            # Resize all to 64x64 and normalize
+            processed = []
+            for f in clip_frames:
+                resized = cv2.resize(f, (64, 64))
+                processed.append(resized)
 
-        # Motion magnitude via optical flow (lighter params)
+            clip = np.array(processed, dtype=np.float32) / 255.0  # (16, 64, 64, 3)
+            clip = np.transpose(clip, (3, 0, 1, 2))  # (3, 16, 64, 64)
+            clip = clip[np.newaxis, ...]  # (1, 3, 16, 64, 64)
+
+            try:
+                if self.violence_onnx_session is not None:
+                    outputs = self.violence_onnx_session.run(
+                        None, {"video_clip": clip}
+                    )
+                    logits = outputs[0][0]  # [non_violent, violent]
+                else:
+                    # PyTorch fallback
+                    tensor = torch.from_numpy(clip)
+                    with torch.no_grad():
+                        logits = self.pose_model(tensor)[0].numpy()
+
+                # Softmax to get probabilities
+                exp_logits = np.exp(logits - np.max(logits))
+                probs = exp_logits / exp_logits.sum()
+                violence_prob = float(probs[1])  # index 1 = violent
+
+                is_violent = violence_prob >= 0.6
+                return {
+                    "is_violent": is_violent,
+                    "confidence": round(violence_prob, 4),
+                    "model": "conv3d",
+                    "pose_data": {},
+                }
+            except Exception as e:
+                logger.warning("Conv3D violence inference failed: %s", e)
+
+        # ── Fallback: optical flow motion detection ──
         motion_score = 0.0
         if previous_frames:
             prev_gray = cv2.cvtColor(previous_frames[-1], cv2.COLOR_BGR2GRAY)
             curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             flow = cv2.calcOpticalFlowFarneback(
                 prev_gray, curr_gray, None,
-                pyr_scale=0.5, levels=2, winsize=11,    # was levels=3, winsize=15
-                iterations=2, poly_n=5, poly_sigma=1.1,  # was iterations=3
+                pyr_scale=0.5, levels=2, winsize=11,
+                iterations=2, poly_n=5, poly_sigma=1.1,
                 flags=0,
             )
             mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
@@ -485,7 +556,8 @@ class DetectionService:
         return {
             "is_violent": is_violent,
             "confidence": round(confidence, 4),
-            "pose_data": pose_data,
+            "model": "optical_flow_fallback",
+            "pose_data": {},
         }
 
     # ==================================================================
@@ -612,7 +684,11 @@ class DetectionService:
         frame: np.ndarray,
         frame_timestamp: datetime,
     ) -> Dict[str, Any]:
-        """Estimate crowd count and density using CSRNet or HOG fallback."""
+        """
+        Estimate crowd count and density using CSRNet or HOG fallback.
+        
+        Returns: dict with count, density, confidence, and density_map_normalized
+        """
         if self.crowd_model is not None:
             try:
                 # Preprocessing must match training pipeline exactly
@@ -635,24 +711,73 @@ class DetectionService:
                 input_array = input_tensor.numpy()
 
                 # Use ONNX Runtime if available (2-4x faster on CPU)
+                density_map = None
                 if self.crowd_onnx_session is not None:
-                    outputs = self.crowd_onnx_session.run(
-                        None, {"input": input_array}
-                    )
-                    density_sum = float(outputs[0].sum())
+                    outputs = self.crowd_onnx_session.run(None, {"input": input_array})
+                    density_map = outputs[0]  # (1, 1, height, width)
+                    density_sum = float(density_map.sum())
                 else:
                     # Fallback: PyTorch
                     with torch.no_grad():
-                        density_map = self.crowd_model(input_tensor)
-                    density_sum = float(density_map.sum().item())
+                        density_tensor = self.crowd_model(input_tensor)
+                    density_map = density_tensor.cpu().numpy()
+                    density_sum = float(density_tensor.sum().item())
 
-                person_count = max(0, int(density_sum))
-                density = min(1.0, person_count / 50.0)
+                raw_count = max(0, density_sum)
+                raw_density_map = np.squeeze(density_map)  # (H, W)
+
+                # ── False-positive filter ──
+                # Real crowds produce sharp peaks at head locations.
+                # Textured surfaces (rust, gravel, foliage) produce a
+                # flat, uniform spread. We detect this by checking:
+                #   1. Peak-to-mean ratio: real crowds have high peaks
+                #   2. Number of distinct peaks above a threshold
+                map_max = float(raw_density_map.max())
+                map_mean = float(raw_density_map.mean()) if raw_density_map.size > 0 else 0.0
+
+                # Peak-to-mean ratio: real people have peaks 5-50x the mean
+                peak_ratio = map_max / (map_mean + 1e-8)
+
+                # Count distinct high-density regions (peaks above 2x mean)
+                if map_mean > 0:
+                    peak_mask = (raw_density_map > map_mean * 2.0).astype(np.uint8)
+                    num_peaks, _ = cv2.connectedComponents(peak_mask)
+                    num_peaks -= 1  # subtract background component
+                else:
+                    num_peaks = 0
+
+                logger.debug(
+                    "CSRNet raw_count=%.1f, map_max=%.4f, map_mean=%.4f, "
+                    "peak_ratio=%.1f, num_peaks=%d",
+                    raw_count, map_max, map_mean, peak_ratio, num_peaks,
+                )
+
+                # Reject if density map looks like texture noise:
+                # - peak_ratio < 3 means density is too uniform (no real heads)
+                # - num_peaks < 1 means no distinct person-like blobs
+                if peak_ratio < 3.0 or num_peaks < 1:
+                    logger.info(
+                        "CSRNet rejected as texture noise (peak_ratio=%.1f, peaks=%d)",
+                        peak_ratio, num_peaks,
+                    )
+                    person_count = 0
+                    density = 0.0
+                else:
+                    person_count = max(0, int(raw_count))
+                    density = min(1.0, person_count / 50.0)
+
+                # Normalize density map for heatmap visualization
+                if raw_density_map.max() > raw_density_map.min():
+                    density_normalized = ((raw_density_map - raw_density_map.min()) /
+                                         (raw_density_map.max() - raw_density_map.min()) * 255).astype(np.uint8)
+                else:
+                    density_normalized = np.zeros_like(raw_density_map, dtype=np.uint8)
 
                 return {
                     "count": person_count,
                     "density": round(density, 4),
                     "confidence": round(density, 4),
+                    "density_map_normalized": density_normalized,
                 }
             except Exception as e:
                 logger.error("CSRNet inference error: %s", e)
@@ -669,6 +794,7 @@ class DetectionService:
             "count": person_count,
             "density": round(density, 4),
             "confidence": round(density, 4),
+            "density_map_normalized": None,  # HOG doesn't provide density map
         }
 
     # ==================================================================
