@@ -13,6 +13,7 @@ class UserBase(BaseModel):
     email: EmailStr
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
+    alert_preference: str = "email"  # "email", "email_sms", "sms"
     role: Role = Role.VIEWER
 
 
@@ -23,13 +24,14 @@ class UserSignup(BaseModel):
     password: str
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
+    alert_preference: str = "email"
     company_id: Optional[int] = None
 
 
 class UserCreate(UserBase):
     """Schema for creating a user (admin only)."""
     password: str
-    company_id: Optional[int] = None  # Required for company users, optional for Aegis AI admins
+    company_id: Optional[int] = None
 
 
 class UserUpdate(BaseModel):
@@ -37,6 +39,7 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
+    alert_preference: Optional[str] = None
     role: Optional[Role] = None
     is_active: Optional[bool] = None
     admin_verified: Optional[bool] = None
@@ -54,6 +57,7 @@ class UserResponse(UserBase):
     admin_verified: bool = False
     email_verified: bool = False
     phone_verified: bool = False
+    alert_preference: str = "email"
     created_at: datetime
     updated_at: Optional[datetime] = None
     last_login: Optional[datetime] = None

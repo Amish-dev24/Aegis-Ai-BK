@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     ALLOWED_ORIGINS: str = ""  # Comma-separated origins for CORS in production
     
+    # Twilio SMS
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_PHONE_NUMBER: str = ""  # Twilio phone number to send FROM
+
     # Data Retention (auto-cleanup of old evidence/detections)
     DATA_RETENTION_DAYS: int = 90  # Delete data older than this (0 = never delete)
 
