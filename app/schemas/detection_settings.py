@@ -31,6 +31,7 @@ class CompanyDetectionSettingsCreate(BaseModel):
     high_threshold: Optional[float] = None
     medium_threshold: Optional[float] = None
     min_confidence: Optional[float] = None
+    alert_on_levels: Optional[str] = "medium,high,critical"  # comma-separated: low,medium,high,critical
 
 
 class CompanyDetectionSettingsUpdate(BaseModel):
@@ -39,6 +40,7 @@ class CompanyDetectionSettingsUpdate(BaseModel):
     high_threshold: Optional[float] = None
     medium_threshold: Optional[float] = None
     min_confidence: Optional[float] = None
+    alert_on_levels: Optional[str] = None  # comma-separated: low,medium,high,critical
 
 
 class CompanyDetectionSettingsResponse(BaseModel):
@@ -50,6 +52,7 @@ class CompanyDetectionSettingsResponse(BaseModel):
     high_threshold: Optional[float] = None
     medium_threshold: Optional[float] = None
     min_confidence: Optional[float] = None
+    alert_on_levels: Optional[str] = "medium,high,critical"
     updated_at: Optional[datetime] = None
 
     class Config:

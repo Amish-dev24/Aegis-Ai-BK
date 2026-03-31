@@ -726,40 +726,58 @@ class DetectionService:
                 raw_count = max(0, density_sum)
                 raw_density_map = np.squeeze(density_map)  # (H, W)
 
-                # ── False-positive filter ──
-                # Real crowds produce sharp peaks at head locations.
-                # Textured surfaces (rust, gravel, foliage) produce a
-                # flat, uniform spread. We detect this by checking:
-                #   1. Peak-to-mean ratio: real crowds have high peaks
-                #   2. Number of distinct peaks above a threshold
+                # ── False-positive filter (multi-check) ──
+                # CSRNet hallucinates crowds on textured surfaces (rust,
+                # gravel, foliage). We use 3 checks to reject false positives:
+
                 map_max = float(raw_density_map.max())
                 map_mean = float(raw_density_map.mean()) if raw_density_map.size > 0 else 0.0
+                map_std = float(raw_density_map.std()) if raw_density_map.size > 0 else 0.0
 
-                # Peak-to-mean ratio: real people have peaks 5-50x the mean
+                # Check 1: Peak-to-mean ratio (real heads = sharp peaks)
                 peak_ratio = map_max / (map_mean + 1e-8)
 
-                # Count distinct high-density regions (peaks above 2x mean)
-                if map_mean > 0:
-                    peak_mask = (raw_density_map > map_mean * 2.0).astype(np.uint8)
-                    num_peaks, _ = cv2.connectedComponents(peak_mask)
-                    num_peaks -= 1  # subtract background component
-                else:
-                    num_peaks = 0
+                # Check 2: Coefficient of variation (real crowds have high variance)
+                cv_ratio = map_std / (map_mean + 1e-8)
 
-                logger.debug(
-                    "CSRNet raw_count=%.1f, map_max=%.4f, map_mean=%.4f, "
-                    "peak_ratio=%.1f, num_peaks=%d",
-                    raw_count, map_max, map_mean, peak_ratio, num_peaks,
+                # Check 3: Use HOG people detector as sanity check
+                # If HOG finds 0 people, CSRNet is likely hallucinating
+                hog_count = 0
+                try:
+                    hog = cv2.HOGDescriptor()
+                    hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+                    small = cv2.resize(frame, (320, 240))
+                    boxes, _ = hog.detectMultiScale(small, winStride=(8, 8), scale=1.05)
+                    hog_count = len(boxes)
+                except Exception:
+                    hog_count = -1  # skip HOG check if it fails
+
+                logger.info(
+                    "CSRNet raw_count=%.1f, peak_ratio=%.1f, cv=%.1f, "
+                    "hog_people=%d, max=%.4f, mean=%.4f",
+                    raw_count, peak_ratio, cv_ratio, hog_count,
+                    map_max, map_mean,
                 )
 
-                # Reject if density map looks like texture noise:
-                # - peak_ratio < 3 means density is too uniform (no real heads)
-                # - num_peaks < 1 means no distinct person-like blobs
-                if peak_ratio < 3.0 or num_peaks < 1:
-                    logger.info(
-                        "CSRNet rejected as texture noise (peak_ratio=%.1f, peaks=%d)",
-                        peak_ratio, num_peaks,
-                    )
+                # Reject as false positive if ANY of these are true:
+                is_fake = False
+
+                # Texture noise: low peak ratio (uniform spread)
+                if peak_ratio < 5.0:
+                    is_fake = True
+                    logger.info("CSRNet rejected: peak_ratio %.1f < 5.0 (too uniform)", peak_ratio)
+
+                # Texture noise: low coefficient of variation
+                if cv_ratio < 1.5:
+                    is_fake = True
+                    logger.info("CSRNet rejected: cv_ratio %.1f < 1.5 (too uniform)", cv_ratio)
+
+                # HOG sanity check: if HOG sees 0 people, CSRNet is wrong
+                if hog_count == 0 and raw_count > 5:
+                    is_fake = True
+                    logger.info("CSRNet rejected: HOG found 0 people but CSRNet says %.0f", raw_count)
+
+                if is_fake:
                     person_count = 0
                     density = 0.0
                 else:
@@ -870,6 +888,9 @@ class DetectionService:
                 thresholds["high_threshold"] = cs.high_threshold
                 thresholds["medium_threshold"] = cs.medium_threshold
                 thresholds["min_confidence"] = cs.min_confidence
+                thresholds["alert_on_levels"] = cs.alert_on_levels or "medium,high,critical"
+            else:
+                thresholds["alert_on_levels"] = "medium,high,critical"
             enabled[module] = thresholds
 
         return enabled
