@@ -277,7 +277,10 @@ def _run_analysis(
         db.add(db_evidence)
         db.flush()
 
-        if threat_level in (ThreatLevel.MEDIUM, ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+        # Check which threat levels should trigger alerts (company setting)
+        alert_levels_str = module_settings.get("alert_on_levels", "medium,high,critical")
+        alert_levels = {s.strip().lower() for s in alert_levels_str.split(",") if s.strip()}
+        if threat_level.value in alert_levels:
             alert = Alert(
                 detection_id=db_detection.id,
                 company_id=company_id,
@@ -662,34 +665,6 @@ async def download_processed_video(
     return FileResponse(
         path=str(file_path),
         filename=f"processed_{job['filename']}",
-        media_type="video/mp4",
-    )
-
-
-# ---------------------------------------------------------------------------
-# GET /video/jobs/{job_id}/heatmap
-# ---------------------------------------------------------------------------
-@router.get("/jobs/{job_id}/heatmap")
-async def download_heatmap_video(
-    job_id: str,
-    current_user: User = Depends(require_any_authenticated),
-):
-    """Download the crowd density heatmap visualization video."""
-    job = _get_job(job_id)
-
-    if job["status"] != "completed":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}")
-
-    if not job.get("heatmap_video_url"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No heatmap generated. Crowd density detection may be disabled.")
-
-    file_path = Path(job["heatmap_video"])
-    if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Heatmap file not found")
-
-    return FileResponse(
-        path=str(file_path),
-        filename=f"heatmap_{job['filename']}",
         media_type="video/mp4",
     )
 

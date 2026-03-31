@@ -41,6 +41,10 @@ class CompanyDetectionSettings(Base):
     # Custom confidence threshold for the AI model itself
     min_confidence = Column(Float, nullable=True)       # ignore detections below this
 
+    # Which threat levels trigger alerts + email (comma-separated: "medium,high,critical")
+    # Default: "medium,high,critical" — set to "high,critical" to skip medium alerts
+    alert_on_levels = Column(String(100), nullable=True, default="medium,high,critical")
+
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     company = relationship("Company")

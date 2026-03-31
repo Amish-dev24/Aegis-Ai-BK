@@ -102,6 +102,7 @@ async def list_evidence(
     camera_id: Optional[int] = Query(None, description="Filter by camera"),
     detection_type: Optional[DetectionType] = Query(None, description="Filter by detection type"),
     threat_level: Optional[ThreatLevel] = Query(None, description="Filter by threat level"),
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confidence threshold"),
     start_date: Optional[datetime] = Query(None, description="Filter from date"),
     end_date: Optional[datetime] = Query(None, description="Filter to date"),
     limit: int = Query(50, ge=1, le=500, description="Max results"),
@@ -128,6 +129,8 @@ async def list_evidence(
         query = query.filter(Detection.detection_type == detection_type)
     if threat_level:
         query = query.filter(Detection.threat_level == threat_level)
+    if min_confidence is not None:
+        query = query.filter(Detection.confidence >= min_confidence)
     if start_date:
         query = query.filter(Detection.frame_timestamp >= start_date)
     if end_date:
