@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     ALLOWED_ORIGINS: str = ""  # Comma-separated origins for CORS in production
     
+    # Data Retention (auto-cleanup of old evidence/detections)
+    DATA_RETENTION_DAYS: int = 90  # Delete data older than this (0 = never delete)
+
     # TLS/SSL
     SSL_CERT_PATH: Optional[str] = None
     SSL_KEY_PATH: Optional[str] = None
