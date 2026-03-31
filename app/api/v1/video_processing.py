@@ -36,6 +36,7 @@ from app.models.audit_log import create_audit_log
 from app.services.detection_service import detection_service
 from app.services.video_service import video_service
 from app.services.email_service import email_service
+from app.services.sms_service import send_alert_sms
 
 import cv2
 import numpy as np
@@ -54,7 +55,7 @@ _email_queue: Queue = Queue()
 
 
 def _email_worker():
-    """Drain the email queue in a background thread."""
+    """Drain the email/SMS queue in a background thread."""
     while True:
         try:
             task = _email_queue.get(timeout=5)
@@ -62,23 +63,43 @@ def _email_worker():
             continue
         if task is None:          # poison pill
             break
-        try:
-            sent = asyncio.run(email_service.send_alert_email(**task["kwargs"]))
-            # Update alert record in DB after successful send
-            alert_id = task.get("alert_id")
-            if sent and alert_id:
-                try:
-                    db = SessionLocal()
-                    alert = db.query(Alert).filter(Alert.id == alert_id).first()
-                    if alert:
-                        alert.email_sent = True
-                        alert.email_sent_at = datetime.utcnow()
-                        db.commit()
-                    db.close()
-                except Exception as db_err:
-                    logger.warning("Failed to update alert %s email status: %s", alert_id, db_err)
-        except Exception as e:
-            logger.warning("Background email failed: %s", e)
+
+        alert_id = task.get("alert_id")
+        alert_pref = task.get("alert_preference", "email")
+        sms_number = task.get("sms_number")
+
+        # Send email if preference includes email
+        if alert_pref in ("email", "email_sms"):
+            try:
+                sent = asyncio.run(email_service.send_alert_email(**task["kwargs"]))
+                if sent and alert_id:
+                    try:
+                        db = SessionLocal()
+                        alert = db.query(Alert).filter(Alert.id == alert_id).first()
+                        if alert:
+                            alert.email_sent = True
+                            alert.email_sent_at = datetime.utcnow()
+                            db.commit()
+                        db.close()
+                    except Exception as db_err:
+                        logger.warning("Failed to update alert %s email status: %s", alert_id, db_err)
+            except Exception as e:
+                logger.warning("Background email failed: %s", e)
+
+        # Send SMS if preference includes sms
+        if alert_pref in ("sms", "email_sms") and sms_number:
+            try:
+                metadata = task.get("kwargs", {}).get("metadata", {})
+                send_alert_sms(
+                    to_number=sms_number,
+                    detection_type=metadata.get("Detection Type", "unknown"),
+                    threat_level=metadata.get("Threat Level", "unknown"),
+                    confidence=float(metadata.get("Confidence", "0%").replace("%", "")) / 100,
+                    camera_name=metadata.get("Camera", "unknown"),
+                    timestamp=metadata.get("Timestamp", ""),
+                )
+            except Exception as e:
+                logger.warning("Background SMS failed: %s", e)
 
 
 _email_thread: threading.Thread | None = None
@@ -168,6 +189,8 @@ async def start_video_processing(
         "company_id": camera.company_id,
         "user_id": current_user.id,
         "user_email": current_user.email,
+        "user_phone": current_user.phone_number or "",
+        "user_alert_preference": getattr(current_user, "alert_preference", "email"),
         "camera_name": camera.name,
         "filename": video_file.filename,
         "upload_path": str(upload_path),
@@ -295,6 +318,8 @@ def _run_analysis(
             # Queue email in background — never block inference
             _email_queue.put({
                 "alert_id": alert.id,
+                "alert_preference": job.get("user_alert_preference", "email"),
+                "sms_number": job.get("user_phone", ""),
                 "kwargs": {
                     "to_emails": [job["user_email"]],
                     "subject": alert.title,
