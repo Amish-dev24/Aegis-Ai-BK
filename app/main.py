@@ -23,6 +23,19 @@ async def lifespan(app: FastAPI):
         logger.warning("SECRET_KEY is set to the default value – change it before deploying!")
     # Startup: Create database tables
     Base.metadata.create_all(bind=engine)
+
+    # Run data retention cleanup on startup (non-blocking)
+    if settings.DATA_RETENTION_DAYS > 0:
+        try:
+            from app.database import SessionLocal
+            from app.services.retention_service import run_retention_cleanup
+            db = SessionLocal()
+            result = run_retention_cleanup(db)
+            logger.info("Startup retention cleanup: %s", result.get("message", "done"))
+            db.close()
+        except Exception as e:
+            logger.warning("Startup retention cleanup failed: %s", e)
+
     yield
     # Shutdown: Cleanup if needed
     pass
