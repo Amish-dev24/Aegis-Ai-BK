@@ -129,7 +129,7 @@ async def start_video_processing(
     camera_id: int,
     video_file: UploadFile = File(...),
     generate_video: bool = Query(False, description="Generate annotated output video (slower)"),
-    process_fps: int = Query(1, ge=1, le=10, description="Frames per second to analyze (1=fast, 10=thorough)"),
+    process_fps: int = Query(1, ge=1, le=30, description="Frames per second to analyze (1=fast, 30=every frame)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_security_officer),
 ):
@@ -542,9 +542,12 @@ def _process_video_sync(job_id: str):
 
         # Re-encode only if video was generated
         if generate_video and Path(output_path).exists():
+            job["status"] = "encoding"
+            job["progress"] = 100
+            logger.info("Job %s: encoding output video to H.264...", job_id)
             video_service.reencode_to_h264(output_path)
             job["output_video_url"] = f"/api/v1/video/jobs/{job_id}/result"
-        
+
         # Re-encode heatmap video if it was generated
         heatmap_file = Path(job["heatmap_video"])
         if heatmap_file.exists():

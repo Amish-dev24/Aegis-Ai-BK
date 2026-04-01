@@ -40,3 +40,31 @@ async def trigger_cleanup(
     """
     result = run_retention_cleanup(db, retention_days=days)
     return result
+
+
+@router.post("/purge-all")
+async def purge_all_data(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Delete ALL detections, evidence, alerts, and logs regardless of age."""
+    from app.models.alert_log import AlertLog
+    from app.models.alert import Alert
+    from app.models.evidence import Evidence
+    from app.models.detection import Detection
+
+    logs = db.query(AlertLog).delete()
+    alerts = db.query(Alert).delete()
+    evidence = db.query(Evidence).delete()
+    detections = db.query(Detection).delete()
+    db.commit()
+
+    return {
+        "message": "All detection data purged",
+        "deleted": {
+            "detections_deleted": detections,
+            "evidence_deleted": evidence,
+            "alerts_deleted": alerts,
+            "alert_logs_deleted": logs,
+        }
+    }

@@ -401,7 +401,7 @@ class DetectionService:
 
         # Step 1: Run shared YOLO once (needed by weapon + abandoned_object)
         need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
-        yolo_results = self.run_yolo_shared(frame, conf=0.4) if need_yolo else None
+        yolo_results = self.run_yolo_shared(frame, conf=0.25) if need_yolo else None
 
         # Step 2: Submit independent models in parallel
         if "weapon" in enabled_modules and yolo_results:
@@ -461,7 +461,7 @@ class DetectionService:
     # ==================================================================
     def _extract_weapons(self, yolo_results: Dict[str, list]) -> List[Dict[str, Any]]:
         """Extract weapon detections from shared YOLO results."""
-        weapon_conf = max(self.confidence_threshold, 0.7)
+        weapon_conf = self.confidence_threshold  # Use configurable threshold (default 0.5)
         return [
             det for det in yolo_results["weapons"]
             if det["confidence"] >= weapon_conf
