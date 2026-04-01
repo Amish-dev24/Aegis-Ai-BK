@@ -131,7 +131,23 @@ async def list_detections(
         query = query.filter(Detection.confidence >= filter_params.min_confidence)
     
     detections = query.order_by(Detection.detected_at.desc()).offset(filter_params.offset).limit(filter_params.limit).all()
-    return detections
+
+    # Enrich with evidence_id for snapshot display
+    result = []
+    for det in detections:
+        det_dict = {
+            "id": det.id, "camera_id": det.camera_id, "company_id": det.company_id,
+            "detection_type": det.detection_type.value if det.detection_type else None,
+            "threat_level": det.threat_level.value if det.threat_level else None,
+            "confidence": det.confidence, "frame_timestamp": det.frame_timestamp,
+            "detected_at": det.detected_at, "bbox_x": det.bbox_x, "bbox_y": det.bbox_y,
+            "bbox_width": det.bbox_width, "bbox_height": det.bbox_height,
+            "detection_metadata": det.detection_metadata,
+        }
+        evidence = db.query(Evidence).filter(Evidence.detection_id == det.id).first()
+        det_dict["evidence_id"] = evidence.id if evidence else None
+        result.append(det_dict)
+    return result
 
 
 @router.get("/{detection_id}", response_model=DetectionResponse)
