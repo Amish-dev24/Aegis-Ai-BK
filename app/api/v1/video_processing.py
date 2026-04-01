@@ -237,7 +237,8 @@ def _run_analysis(
         )
 
     all_raw = detection_service.detect_all_parallel(
-        ai_frame, ai_prev, timestamp, object_history, enabled_modules
+        ai_frame, ai_prev, timestamp, object_history, enabled_modules,
+        full_frame=full_frame,  # CSRNet needs original resolution
     )
 
     for det_type, det in all_raw:
@@ -337,12 +338,17 @@ def _run_analysis(
 
             job["total_alerts"] += 1
 
-        active_detections.append({
+        det_entry = {
             "det_type": det_type.value,
             "confidence": confidence,
             "bbox": bbox,
             "class_name": det.get("class", det_type.value),
-        })
+        }
+        # Include crowd data for heatmap overlay on video
+        if det_type == DetectionType.CROWD_DENSITY:
+            det_entry["count"] = det.get("count", 0)
+            det_entry["density"] = det.get("density", 0.0)
+        active_detections.append(det_entry)
 
         job["detections"].append({
             "id": db_detection.id,
@@ -410,6 +416,12 @@ def _process_video_sync(job_id: str):
         company_id = job["company_id"]
 
         enabled_modules = detection_service.get_enabled_modules(db, company_id)
+
+        # Apply company-configured abandoned object threshold
+        ab_settings = enabled_modules.get("abandoned_object", {})
+        if ab_settings.get("abandoned_seconds"):
+            detection_service.abandoned_threshold = ab_settings["abandoned_seconds"]
+
         active_detections: list = []
         heatmap_overlay: Optional[np.ndarray] = None
         video_start = datetime.now()
