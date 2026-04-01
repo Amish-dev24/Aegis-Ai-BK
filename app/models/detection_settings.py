@@ -42,8 +42,10 @@ class CompanyDetectionSettings(Base):
     min_confidence = Column(Float, nullable=True)       # ignore detections below this
 
     # Which threat levels trigger alerts + email (comma-separated: "medium,high,critical")
-    # Default: "medium,high,critical" — set to "high,critical" to skip medium alerts
     alert_on_levels = Column(String(100), nullable=True, default="medium,high,critical")
+
+    # Abandoned object duration threshold (seconds) — only for abandoned_object module
+    abandoned_seconds = Column(Integer, nullable=True)  # default: 60
 
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

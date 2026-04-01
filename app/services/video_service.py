@@ -202,14 +202,27 @@ class VideoService:
 
         # Apply heatmap overlay first (if crowd density detection exists)
         if heatmap_overlay is not None and heatmap_overlay.shape[:2] == (h, w):
-            # Blend heatmap (0.4) with original frame (0.6)
             annotated = cv2.addWeighted(annotated, 0.6, heatmap_overlay, 0.4, 0)
+
+        # Draw crowd count/density text from crowd_density detections
+        for det in detections:
+            if det.get("det_type") == "crowd_density":
+                count = det.get("count", 0)
+                density_val = det.get("density", 0.0)
+                # Draw background box for text
+                cv2.rectangle(annotated, (10, 10), (300, 90), (0, 0, 0), -1)
+                cv2.rectangle(annotated, (10, 10), (300, 90), (0, 255, 255), 2)
+                cv2.putText(annotated, f"People: {count}", (20, 45),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(annotated, f"Density: {int(density_val * 100)}%", (20, 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2, cv2.LINE_AA)
+                break  # only one crowd_density per frame
 
         # Draw bounding boxes for non-crowd detections
         for det in detections:
             det_type = det.get("det_type", "")
-            
-            # Skip crowd_density — we already drew the heatmap
+
+            # Skip crowd_density — we already drew the heatmap + text
             if det_type == "crowd_density":
                 continue
 

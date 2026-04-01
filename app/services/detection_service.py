@@ -383,9 +383,13 @@ class DetectionService:
         frame_timestamp: datetime,
         object_history: Dict[str, List[datetime]],
         enabled_modules: Dict[str, Dict[str, Any]],
+        full_frame: Optional[np.ndarray] = None,
     ) -> List[tuple]:
         """
         Run all enabled detection modules in parallel.
+        Args:
+            frame: downscaled frame for YOLO/face/violence (640px max)
+            full_frame: original resolution frame for CSRNet (needs full res for accurate count)
         Returns list of (DetectionType, detection_dict) tuples.
         """
         all_results: List[tuple] = []
@@ -416,8 +420,10 @@ class DetectionService:
             )
 
         if "crowd_density" in enabled_modules:
+            # CSRNet needs ORIGINAL resolution frame for accurate scale factor
+            crowd_frame = full_frame if full_frame is not None else frame
             futures["crowd_density"] = self._inference_pool.submit(
-                self.calculate_crowd_density, frame, frame_timestamp
+                self.calculate_crowd_density, crowd_frame, frame_timestamp
             )
 
         if "violence" in enabled_modules:
@@ -723,66 +729,49 @@ class DetectionService:
                     density_map = density_tensor.cpu().numpy()
                     density_sum = float(density_tensor.sum().item())
 
-                raw_count = max(0, density_sum)
                 raw_density_map = np.squeeze(density_map)  # (H, W)
 
-                # ── False-positive filter (multi-check) ──
-                # CSRNet hallucinates crowds on textured surfaces (rust,
-                # gravel, foliage). We use 3 checks to reject false positives:
+                # ── Scale factor ──
+                # CSRNet was trained on ShanghaiTech (close-up ground-level).
+                # It underestimates on downscaled/aerial views because the
+                # density map resolution (48x64) loses small heads.
+                # Scale factor compensates based on original frame vs model input.
+                orig_h, orig_w = frame.shape[:2]
+                orig_pixels = orig_h * orig_w
+                model_pixels = 384 * 512
+                # Scale proportional to resolution ratio (capped at 10x)
+                scale_factor = min(10.0, max(1.0, (orig_pixels / model_pixels) ** 0.5))
 
+                raw_count = max(0, density_sum) * scale_factor
+
+                # ── False-positive filter ──
                 map_max = float(raw_density_map.max())
                 map_mean = float(raw_density_map.mean()) if raw_density_map.size > 0 else 0.0
                 map_std = float(raw_density_map.std()) if raw_density_map.size > 0 else 0.0
 
-                # Check 1: Peak-to-mean ratio (real heads = sharp peaks)
                 peak_ratio = map_max / (map_mean + 1e-8)
-
-                # Check 2: Coefficient of variation (real crowds have high variance)
                 cv_ratio = map_std / (map_mean + 1e-8)
 
-                # Check 3: Use HOG people detector as sanity check
-                # If HOG finds 0 people, CSRNet is likely hallucinating
-                hog_count = 0
-                try:
-                    hog = cv2.HOGDescriptor()
-                    hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-                    small = cv2.resize(frame, (320, 240))
-                    boxes, _ = hog.detectMultiScale(small, winStride=(8, 8), scale=1.05)
-                    hog_count = len(boxes)
-                except Exception:
-                    hog_count = -1  # skip HOG check if it fails
-
                 logger.info(
-                    "CSRNet raw_count=%.1f, peak_ratio=%.1f, cv=%.1f, "
-                    "hog_people=%d, max=%.4f, mean=%.4f",
-                    raw_count, peak_ratio, cv_ratio, hog_count,
+                    "CSRNet raw=%.1f (scaled x%.1f), peak_ratio=%.1f, cv=%.1f, "
+                    "max=%.4f, mean=%.4f",
+                    raw_count, scale_factor, peak_ratio, cv_ratio,
                     map_max, map_mean,
                 )
 
-                # Reject as false positive if ANY of these are true:
-                is_fake = False
-
-                # Texture noise: low peak ratio (uniform spread)
-                if peak_ratio < 5.0:
-                    is_fake = True
-                    logger.info("CSRNet rejected: peak_ratio %.1f < 5.0 (too uniform)", peak_ratio)
-
-                # Texture noise: low coefficient of variation
-                if cv_ratio < 1.5:
-                    is_fake = True
-                    logger.info("CSRNet rejected: cv_ratio %.1f < 1.5 (too uniform)", cv_ratio)
-
-                # HOG sanity check: if HOG sees 0 people, CSRNet is wrong
-                if hog_count == 0 and raw_count > 5:
-                    is_fake = True
-                    logger.info("CSRNet rejected: HOG found 0 people but CSRNet says %.0f", raw_count)
+                # Reject only if density map is very uniform (texture noise)
+                # Real crowds always have peaks (peak_ratio > 3) and variance (cv > 1)
+                is_fake = (peak_ratio < 3.0 and cv_ratio < 1.0)
 
                 if is_fake:
+                    logger.info("CSRNet REJECTED as noise (peak=%.1f, cv=%.1f)", peak_ratio, cv_ratio)
                     person_count = 0
                     density = 0.0
                 else:
                     person_count = max(0, int(raw_count))
                     density = min(1.0, person_count / 50.0)
+                    logger.info("CSRNet ACCEPTED: count=%d, density=%.2f, scale=%.1fx",
+                                person_count, density, scale_factor)
 
                 # Normalize density map for heatmap visualization
                 if raw_density_map.max() > raw_density_map.min():
@@ -889,6 +878,8 @@ class DetectionService:
                 thresholds["medium_threshold"] = cs.medium_threshold
                 thresholds["min_confidence"] = cs.min_confidence
                 thresholds["alert_on_levels"] = cs.alert_on_levels or "medium,high,critical"
+                if cs.abandoned_seconds:
+                    thresholds["abandoned_seconds"] = cs.abandoned_seconds
             else:
                 thresholds["alert_on_levels"] = "medium,high,critical"
             enabled[module] = thresholds
