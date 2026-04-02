@@ -113,12 +113,12 @@ def check_company_access(user: User, company_id: int) -> bool:
     return False
 
 
-def get_user_company_filter(user: User):
-    """Get company filter for queries based on user role."""
-    # Aegis AI admins can see all companies
+def get_user_company_filter(user: User, company_id_override: int = None):
+    """Get company filter for queries based on user role.
+    For aegis_admin: pass company_id_override to filter by specific company, or None for all.
+    """
     if user.role == Role.AEGIS_ADMIN:
-        return None
-    # Company users can only see their own company
+        return company_id_override
     return user.company_id
 
 

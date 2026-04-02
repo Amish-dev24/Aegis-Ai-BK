@@ -61,6 +61,7 @@ async def create_evidence(
     detection_id: int,
     image_file: UploadFile = File(...),
     metadata_json: str = None,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
@@ -98,6 +99,7 @@ async def create_evidence(
 
 @router.get("", response_model=List[EvidenceResponse])
 async def list_evidence(
+    request: Request,
     detection_id: Optional[int] = None,
     camera_id: Optional[int] = Query(None, description="Filter by camera"),
     detection_type: Optional[DetectionType] = Query(None, description="Filter by detection type"),
@@ -107,11 +109,12 @@ async def list_evidence(
     end_date: Optional[datetime] = Query(None, description="Filter to date"),
     limit: int = Query(50, ge=1, le=500, description="Max results"),
     offset: int = Query(0, ge=0, description="Skip results"),
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
     """List evidence with filters and pagination. Includes detection context."""
-    company_filter = get_user_company_filter(current_user)
+    company_filter = get_user_company_filter(current_user, company_id)
 
     query = db.query(Evidence, Detection, Camera).join(
         Detection, Evidence.detection_id == Detection.id
@@ -144,6 +147,7 @@ async def list_evidence(
 @router.get("/{evidence_id}", response_model=EvidenceResponse)
 async def get_evidence(
     evidence_id: int,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
@@ -167,6 +171,7 @@ async def get_evidence(
 @router.get("/{evidence_id}/image")
 async def view_evidence_image(
     evidence_id: int,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
@@ -198,6 +203,7 @@ async def view_evidence_image(
 @router.get("/{evidence_id}/download")
 async def download_evidence(
     evidence_id: int,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
@@ -231,6 +237,7 @@ async def download_evidence(
 async def export_evidence(
     request: Request,
     detection_ids: List[int],
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):

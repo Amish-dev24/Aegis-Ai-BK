@@ -1,8 +1,8 @@
 """
 Camera management endpoints.
 """
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from typing import Optional, List
+from fastapi import Query, APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import require_security_officer, get_current_user, get_user_company_filter, check_company_access
@@ -54,15 +54,16 @@ async def create_camera(
 
 @router.get("", response_model=List[CameraResponse])
 async def list_cameras(
+    request: Request,
+    company_id: Optional[int] = Query(None, description="Filter by company"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     active_only: bool = False
 ):
     """List cameras. Company users see only their company's cameras."""
     query = db.query(Camera)
-    
-    # Filter by company (unless Aegis AI admin)
-    company_filter = get_user_company_filter(current_user)
+
+    company_filter = get_user_company_filter(current_user, company_id)
     if company_filter is not None:
         query = query.filter(Camera.company_id == company_filter)
     

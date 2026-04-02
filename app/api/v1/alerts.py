@@ -142,6 +142,7 @@ async def create_alert(
 # ---------------------------------------------------------------------------
 @router.get("", response_model=List[AlertDetailResponse])
 async def list_alerts(
+    request: Request,
     status_filter: Optional[AlertStatus] = Query(None, alias="status", description="Filter by alert status"),
     threat_level: Optional[ThreatLevel] = Query(None, description="Filter by threat level"),
     detection_type: Optional[DetectionType] = Query(None, description="Filter by detection type"),
@@ -150,11 +151,12 @@ async def list_alerts(
     end_date: Optional[datetime] = Query(None, description="Filter to date"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
 ):
     """List alerts with filters. Includes detection context, camera info, and evidence image."""
-    company_filter = get_user_company_filter(current_user)
+    company_filter = get_user_company_filter(current_user, company_id)
 
     query = db.query(Alert, Detection, Camera).join(
         Detection, Alert.detection_id == Detection.id
@@ -201,6 +203,7 @@ async def list_alerts(
 @router.get("/{alert_id}", response_model=AlertDetailResponse)
 async def get_alert(
     alert_id: int,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
@@ -271,6 +274,7 @@ async def add_alert_log(
 @router.get("/{alert_id}/logs", response_model=List[AlertLogResponse])
 async def list_alert_logs(
     alert_id: int,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
 ):

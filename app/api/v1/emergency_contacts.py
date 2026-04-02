@@ -3,7 +3,7 @@ Emergency contact directory endpoints.
 """
 from typing import List, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import Request, Query, APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import require_admin, require_any_authenticated, check_company_access, get_user_company_filter
@@ -45,7 +45,7 @@ async def list_contacts(
     current_user: User = Depends(require_any_authenticated),
 ):
     """List emergency contacts for the user's company."""
-    company_filter = get_user_company_filter(current_user)
+    company_filter = current_user.company_id
     query = db.query(EmergencyContact)
     if company_filter is not None:
         query = query.filter(EmergencyContact.company_id == company_filter)

@@ -1,8 +1,8 @@
 """
 Detection endpoints for managing AI detections.
 """
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from app.database import get_db
@@ -103,17 +103,19 @@ async def create_detection(
     return db_detection
 
 
-@router.get("", response_model=List[DetectionResponse])
+@router.get("")
 async def list_detections(
+    request: Request,
     filter_params: DetectionFilter = Depends(),
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis_admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
     """List detections with filtering. Company users see only their company's detections."""
     query = db.query(Detection)
-    
-    # Filter by company (unless Aegis AI admin)
-    company_filter = get_user_company_filter(current_user)
+
+    # Filter by company (aegis_admin can override with company_id param)
+    company_filter = get_user_company_filter(current_user, company_id)
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
     
@@ -530,6 +532,7 @@ async def process_image(
 
 @router.get("/stats/summary")
 async def get_detection_stats(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
     days: int = 7
