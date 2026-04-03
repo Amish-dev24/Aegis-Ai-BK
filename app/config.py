@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Aegis AI Security System"
     
     # Detection Models
-    MODEL_PATH: str = "./models/weapon_detection.pt"           # YOLOv8 — Bags, Box, Weapons
+    MODEL_PATH: str = "./models/weapon_detection_v2.onnx"      # YOLO11m — Bags, Box, Weapons (v2)
     FACE_MODEL_PATH: str = "./models/face_detection.pt"        # YOLOv8 — covered, uncovered
     CROWD_MODEL_PATH: str = "./models/csrnet_crowd.pth.tar"    # CSRNet density estimator
     POSE_MODEL_PATH: str = "./models/pose_estimation.pb"       # MediaPipe (optional)
