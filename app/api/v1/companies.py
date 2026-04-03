@@ -189,9 +189,9 @@ async def create_company(
     request: Request,
     company_data: CompanyCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_aegis_admin)
+    current_user: User = Depends(require_admin)
 ):
-    """Create a new company (Aegis AI admin only)."""
+    """Create a new company. Admin creates unverified, aegis_admin creates verified."""
     # Check if company name already exists
     if db.query(Company).filter(Company.name == company_data.name).first():
         raise HTTPException(
@@ -207,10 +207,18 @@ async def create_company(
         )
     
     db_company = Company(**company_data.dict())
+    # Aegis admin creates verified companies, regular admin creates unverified
+    if current_user.role.value != 'aegis_admin':
+        db_company.is_verified = False
     db.add(db_company)
     db.commit()
     db.refresh(db_company)
-    
+
+    # Assign the creating admin to this company (if they don't have one)
+    if not current_user.company_id and current_user.role.value == 'admin':
+        current_user.company_id = db_company.id
+        db.commit()
+
     # Log creation
     db.add(create_audit_log(
         request, current_user.id, "create_company", "company", db_company.id,

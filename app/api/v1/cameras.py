@@ -27,12 +27,9 @@ async def create_camera(
     
     # Set company_id based on user role
     if current_user.role == Role.AEGIS_ADMIN:
-        # Aegis AI admins can specify company_id, but it should be in the request
+        # Aegis admin: use provided company_id, or fall back to their own company
         if "company_id" not in camera_dict or camera_dict["company_id"] is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="company_id is required"
-            )
+            camera_dict["company_id"] = current_user.company_id
     else:
         # Company users automatically get their company_id
         camera_dict["company_id"] = current_user.company_id
