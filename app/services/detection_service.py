@@ -704,7 +704,10 @@ class DetectionService:
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil_img = Image.fromarray(frame_rgb)
-                pil_img = pil_img.resize((512, 384), Image.BILINEAR)
+                max_side = max(32, int(settings.CROWD_INFERENCE_MAX_SIDE))
+                # Training uses 512x384 (4:3); ONNX export uses dynamic H/W
+                cw, ch = max_side, int(384 * max_side / 512)
+                pil_img = pil_img.resize((cw, ch), Image.BILINEAR)
 
                 transform = transforms.Compose([
                     transforms.ToTensor(),
@@ -713,7 +716,7 @@ class DetectionService:
                         std=[0.229, 0.224, 0.225],
                     ),
                 ])
-                input_tensor = transform(pil_img).unsqueeze(0)  # (1, 3, 384, 512)
+                input_tensor = transform(pil_img).unsqueeze(0)  # (1, 3, ch, cw)
                 input_array = input_tensor.numpy()
 
                 # Use ONNX Runtime if available (2-4x faster on CPU)
@@ -738,7 +741,7 @@ class DetectionService:
                 # Scale factor compensates based on original frame vs model input.
                 orig_h, orig_w = frame.shape[:2]
                 orig_pixels = orig_h * orig_w
-                model_pixels = 384 * 512
+                model_pixels = ch * cw
                 # Scale proportional to resolution ratio (capped at 10x)
                 scale_factor = min(10.0, max(1.0, (orig_pixels / model_pixels) ** 0.5))
 
