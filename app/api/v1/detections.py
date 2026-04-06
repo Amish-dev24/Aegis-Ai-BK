@@ -233,7 +233,10 @@ async def process_video(
 
             # --- 1. Weapon detection (YOLOv8) ---
             if "weapon" in enabled_modules:
-                for det in detection_service.detect_weapons(frame, timestamp):
+                w_minc = enabled_modules["weapon"].get("min_confidence")
+                for det in detection_service.detect_weapons(
+                    frame, timestamp, min_confidence=w_minc
+                ):
                     all_raw_detections.append((DetectionType.WEAPON, det))
 
             # --- 2. Violence / aggression detection (MediaPipe + motion) ---
@@ -272,7 +275,7 @@ async def process_video(
 
                 # Skip if below company's custom min_confidence
                 min_conf = module_settings.get("min_confidence")
-                if min_conf and confidence < min_conf:
+                if min_conf is not None and confidence < min_conf:
                     continue
 
                 threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
@@ -418,7 +421,10 @@ async def process_image(
 
     # Run all detection modules on the single frame
     if "weapon" in enabled_modules:
-        for det in detection_service.detect_weapons(frame, timestamp):
+        w_minc = enabled_modules["weapon"].get("min_confidence")
+        for det in detection_service.detect_weapons(
+            frame, timestamp, min_confidence=w_minc
+        ):
             all_raw_detections.append((DetectionType.WEAPON, det))
 
     if "violence" in enabled_modules:
@@ -442,7 +448,7 @@ async def process_image(
 
         # Skip if below company's custom min_confidence
         min_conf = module_settings.get("min_confidence")
-        if min_conf and confidence < min_conf:
+        if min_conf is not None and confidence < min_conf:
             continue
 
         threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)

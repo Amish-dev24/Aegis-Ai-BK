@@ -27,13 +27,19 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Aegis AI Security System"
     
     # Detection Models
-    MODEL_PATH: str = "./models/weapon_detection_v2.onnx"      # YOLO11m — Bags, Box, Weapons (v2)
+    MODEL_PATH: str = "./models/weapon-box-bags-v3.pt"         # YOLO — Bags, Box, Weapons (v3)
     FACE_MODEL_PATH: str = "./models/face_detection.pt"        # YOLOv8 — covered, uncovered
     CROWD_MODEL_PATH: str = "./models/csrnet_crowd.pth.tar"    # CSRNet density estimator
     CROWD_INFERENCE_MAX_SIDE: int = 512  # CSRNet input: longer side in px (4:3, e.g. 512x384)
     POSE_MODEL_PATH: str = "./models/pose_estimation.pb"       # MediaPipe (optional)
     CONFIDENCE_THRESHOLD: float = 0.5
     ABANDONED_OBJECT_THRESHOLD_SECONDS: int = 60
+    # Weapon YOLO max inference side when using PyTorch weights (no ONNX fixed-input cap)
+    WEAPON_YOLO_IMGSZ: int = 640
+    # Video resize max side when weapon module runs (640 matches typical ONNX export on CPU)
+    WEAPON_VIDEO_AI_MAX_SIDE: int = 640
+    # Fixed export size for ONNX (must match exported graph)
+    ONNX_YOLO_IMGSZ: int = 640
     
     # File Storage
     UPLOAD_DIR: str = "./uploads"

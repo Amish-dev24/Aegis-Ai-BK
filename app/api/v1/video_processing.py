@@ -252,7 +252,7 @@ def _run_analysis(
         confidence = det.get("confidence", 0.0)
         module_settings = enabled_modules.get(det_type.value, {})
         min_conf = module_settings.get("min_confidence")
-        if min_conf and confidence < min_conf:
+        if min_conf is not None and confidence < min_conf:
             continue
 
         threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
@@ -427,7 +427,7 @@ def _process_video_sync(job_id: str):
         video_start = datetime.now()
         pending_db_count = 0
 
-        # Pre-calculate resize for AI inference (640px max side)
+        # Pre-calculate resize for AI inference (640px max side; larger for weapon — small guns in HD video)
         ai_max_size = 640
         scale = min(ai_max_size / width, ai_max_size / height, 1.0)
         ai_width = int(width * scale)
