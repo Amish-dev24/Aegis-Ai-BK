@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     MODEL_PATH: str = "./models/weapon_detection_v2.onnx"      # YOLO11m — Bags, Box, Weapons (v2)
     FACE_MODEL_PATH: str = "./models/face_detection.pt"        # YOLOv8 — covered, uncovered
     CROWD_MODEL_PATH: str = "./models/csrnet_crowd.pth.tar"    # CSRNet density estimator
+    CROWD_INFERENCE_MAX_SIDE: int = 512  # CSRNet input: longer side in px (4:3, e.g. 512x384)
     POSE_MODEL_PATH: str = "./models/pose_estimation.pb"       # MediaPipe (optional)
     CONFIDENCE_THRESHOLD: float = 0.5
     ABANDONED_OBJECT_THRESHOLD_SECONDS: int = 60
