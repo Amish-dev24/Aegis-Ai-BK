@@ -2,14 +2,14 @@
 Detection service for integrating with AI models.
 
 Models used:
-- weapon_detection.pt  (YOLOv8) — classes: {0: Bags, 1: Box, 2: Weapons}
+- weapon-box-bags-v3.pt (YOLO) — Bags, Box, Weapons
 - face_detection.pt    (YOLOv8) — classes: {0: covered, 1: uncovered}
 - csrnet_crowd.pth.tar (CSRNet) — crowd density estimation
 - MediaPipe Pose       (optional) — violence / aggression detection
 - MOG2 background subtraction    — abandoned object detection
 
 Performance optimizations:
-- ONNX Runtime for all models (2-4x faster than PyTorch on CPU)
+- ONNX Runtime for YOLO on CPU (faster than raw PyTorch)
 - YOLO runs ONCE per frame; results shared between weapon + abandoned object detection
 - All model inferences run in parallel via ThreadPoolExecutor
 - MediaPipe model_complexity=0 (fastest)
@@ -30,6 +30,33 @@ from app.config import settings
 from app.models.detection import DetectionType, ThreatLevel
 
 logger = logging.getLogger(__name__)
+
+# weapon-box-bags-v3.pt — class names in the checkpoint (Ultralytics val table):
+#   Bags | Box | Weapons
+# Routing: Weapons → weapon detections; Bags + Box → abandoned / bags_boxes.
+_BAG_BOX_CLASS_NAMES = frozenset({"bags", "bag", "box", "boxes"})
+
+
+def _is_weapon_class(cls_name: str) -> bool:
+    """True if this label is the weapon class (primary: ``Weapons`` from weapon-box-bags-v3)."""
+    n = cls_name.lower().strip()
+    if not n:
+        return False
+    if n in (
+        "weapon",
+        "weapons",
+        "gun",
+        "guns",
+        "pistol",
+        "rifle",
+        "firearm",
+        "handgun",
+        "knife",
+        "knives",
+    ):
+        return True
+    return "weapon" in n or "gun" in n or "pistol" in n or "rifle" in n or "firearm" in n
+
 
 # Try to import ONNX Runtime — falls back to PyTorch if unavailable
 try:
@@ -104,6 +131,8 @@ class DetectionService:
 
         # Model references (populated by _load_models)
         self.weapon_model = None       # YOLOv8 — Bags / Box / Weapons
+        # When weapon model is loaded from .onnx (fixed input), cap predict imgsz (see ONNX_YOLO_IMGSZ)
+        self._weapon_onnx_imgsz_cap: Optional[int] = None
         self.face_model = None         # YOLOv8 — covered / uncovered
         self.crowd_model = None        # CSRNet (or "onnx" sentinel when using ONNX)
         self.crowd_onnx_session = None # ONNX Runtime session for CSRNet
@@ -126,49 +155,60 @@ class DetectionService:
     # ==================================================================
     def _load_yolo_onnx(self, pt_path: Path, model_name: str):
         """
-        Load a YOLO model. If ONNX Runtime is available, export to ONNX
-        on first run and load the ONNX version (2-4x faster on CPU).
-        Falls back to PyTorch if onnxruntime is not installed.
+        Load a YOLO model. Prefer ONNX Runtime (export from `.pt` if needed), else PyTorch.
+
+        Returns:
+            (model, fixed_imgsz_cap): cap is set for ONNX fixed exports (``ONNX_YOLO_IMGSZ``),
+            or None when using PyTorch weights.
         """
         try:
             from ultralytics import YOLO
         except ImportError:
             logger.warning("ultralytics not installed — %s detection disabled", model_name)
-            return None
+            return None, None
 
+        fixed_cap = int(getattr(settings, "ONNX_YOLO_IMGSZ", 640))
         onnx_path = pt_path.with_suffix(".onnx")
 
         if ORT_AVAILABLE and onnx_path.exists():
-            # ONNX already exported — load directly (fast startup)
             try:
                 model = YOLO(str(onnx_path), task="detect")
-                logger.info("%s loaded from ONNX: %s — classes: %s", model_name, onnx_path, model.names)
-                return model
+                logger.info(
+                    "%s loaded from ONNX: %s — classes: %s (predict imgsz capped at %d)",
+                    model_name,
+                    onnx_path,
+                    model.names,
+                    fixed_cap,
+                )
+                return model, fixed_cap
             except Exception as e:
-                logger.warning("Failed to load ONNX %s, falling back to PyTorch: %s", model_name, e)
+                logger.warning("Failed to load ONNX %s, falling back: %s", model_name, e)
 
-        if ORT_AVAILABLE and not onnx_path.exists():
-            # Export .pt → .onnx (one-time, takes ~30s)
+        if ORT_AVAILABLE and not onnx_path.exists() and pt_path.suffix.lower() in (".pt", ".pth"):
             try:
                 logger.info("Exporting %s to ONNX (one-time operation)...", model_name)
                 temp_model = YOLO(str(pt_path))
-                temp_model.export(format="onnx", opset=17, simplify=True)
+                temp_model.export(format="onnx", opset=17, simplify=True, imgsz=fixed_cap)
                 logger.info("ONNX export complete: %s", onnx_path)
-                # Load the exported ONNX model
                 model = YOLO(str(onnx_path), task="detect")
-                logger.info("%s loaded from ONNX: %s — classes: %s", model_name, onnx_path, model.names)
-                return model
+                logger.info(
+                    "%s loaded from ONNX: %s — classes: %s (predict imgsz capped at %d)",
+                    model_name,
+                    onnx_path,
+                    model.names,
+                    fixed_cap,
+                )
+                return model, fixed_cap
             except Exception as e:
                 logger.warning("ONNX export failed for %s, using PyTorch: %s", model_name, e)
 
-        # Fallback: plain PyTorch
         try:
             model = YOLO(str(pt_path))
             logger.info("%s loaded from PyTorch: %s — classes: %s", model_name, pt_path, model.names)
-            return model
+            return model, None
         except Exception as e:
             logger.error("Failed to load %s: %s", model_name, e)
-            return None
+            return None, None
 
     def _load_csrnet_onnx(self, crowd_path: Path):
         """
@@ -236,14 +276,16 @@ class DetectionService:
         # --- 1. YOLOv8 weapon / object model (Bags, Box, Weapons) ---
         weapon_path = Path(settings.MODEL_PATH)
         if weapon_path.exists():
-            self.weapon_model = self._load_yolo_onnx(weapon_path, "Weapon")
+            self.weapon_model, self._weapon_onnx_imgsz_cap = self._load_yolo_onnx(
+                weapon_path, "Weapon"
+            )
         else:
             logger.warning("Weapon model not found at %s — weapon detection disabled", weapon_path)
 
         # --- 2. YOLOv8 face model (covered / uncovered) ---
         face_path = Path(settings.FACE_MODEL_PATH)
         if face_path.exists():
-            self.face_model = self._load_yolo_onnx(face_path, "Face")
+            self.face_model, _ = self._load_yolo_onnx(face_path, "Face")
         else:
             logger.warning("Face model not found at %s — face detection disabled", face_path)
 
@@ -337,7 +379,7 @@ class DetectionService:
     # Shared YOLO inference — run weapon model ONCE, split results
     # ==================================================================
     def run_yolo_shared(
-        self, frame: np.ndarray, conf: float = 0.4
+        self, frame: np.ndarray, conf: float = 0.4, imgsz: Optional[int] = None
     ) -> Dict[str, list]:
         """
         Run the weapon YOLO model once and split results into categories.
@@ -347,7 +389,23 @@ class DetectionService:
             return {"weapons": [], "bags_boxes": [], "all_boxes": []}
 
         h, w = frame.shape[:2]
-        results = self.weapon_model(frame, conf=conf, verbose=False)
+        max_side = max(h, w)
+        if imgsz is not None:
+            infer_sz = int(imgsz)
+        else:
+            # PyTorch: up to WEAPON_YOLO_IMGSZ. ONNX: fixed export (default 640) — larger causes ONNXRuntimeError.
+            lim = (
+                self._weapon_onnx_imgsz_cap
+                if self._weapon_onnx_imgsz_cap is not None
+                else getattr(settings, "WEAPON_YOLO_IMGSZ", 1280)
+            )
+            infer_sz = min(max_side, lim)
+        infer_sz = max(32, int(infer_sz))
+        if self._weapon_onnx_imgsz_cap is not None:
+            infer_sz = min(infer_sz, self._weapon_onnx_imgsz_cap)
+        results = self.weapon_model(
+            frame, conf=conf, imgsz=infer_sz, verbose=False
+        )
 
         weapons = []
         bags_boxes = []
@@ -366,9 +424,9 @@ class DetectionService:
                 }
                 all_boxes.append(det)
 
-                if cls_name.lower() == "weapons":
+                if _is_weapon_class(cls_name):
                     weapons.append(det)
-                elif cls_name.lower() in ("bags", "box"):
+                elif cls_name.lower().strip() in _BAG_BOX_CLASS_NAMES:
                     bags_boxes.append(det)
 
         return {"weapons": weapons, "bags_boxes": bags_boxes, "all_boxes": all_boxes}
@@ -395,18 +453,34 @@ class DetectionService:
         all_results: List[tuple] = []
         futures = {}
 
-        # Check frame similarity — skip expensive AI if frame barely changed
-        if self.is_frame_similar(frame):
+        # Skip near-duplicate frames for speed — but not when weapon/abandoned YOLO runs:
+        # small objects (guns) barely move the correlation score frame-to-frame.
+        need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
+        similar = self.is_frame_similar(frame)
+        if similar and not need_yolo:
             return []
 
-        # Step 1: Run shared YOLO once (needed by weapon + abandoned_object)
-        need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
-        yolo_results = self.run_yolo_shared(frame, conf=0.25) if need_yolo else None
+        weapon_min = enabled_modules.get("weapon", {}).get("min_confidence")
+        weapon_conf = (
+            float(weapon_min) if weapon_min is not None else self.confidence_threshold
+        )
+
+        # Ultralytics `conf` drops boxes below this before post-processing. It must be
+        # <= company min_confidence (e.g. 0.2 vs hardcoded 0.25 loses valid boxes).
+        # When min is high, keep raw conf at 0.25 max and filter in _extract_weapons.
+        if need_yolo:
+            if "weapon" in enabled_modules:
+                yolo_conf = max(0.01, min(weapon_conf, 0.25))
+            else:
+                yolo_conf = 0.25
+            yolo_results = self.run_yolo_shared(frame, conf=yolo_conf)
+        else:
+            yolo_results = None
 
         # Step 2: Submit independent models in parallel
         if "weapon" in enabled_modules and yolo_results:
             futures["weapon"] = self._inference_pool.submit(
-                self._extract_weapons, yolo_results
+                self._extract_weapons, yolo_results, weapon_conf
             )
 
         if "abandoned_object" in enabled_modules and yolo_results:
@@ -459,11 +533,13 @@ class DetectionService:
     # ==================================================================
     # 1. Weapon detection — extract from shared YOLO results
     # ==================================================================
-    def _extract_weapons(self, yolo_results: Dict[str, list]) -> List[Dict[str, Any]]:
+    def _extract_weapons(
+        self, yolo_results: Dict[str, list], weapon_conf: float
+    ) -> List[Dict[str, Any]]:
         """Extract weapon detections from shared YOLO results."""
-        weapon_conf = self.confidence_threshold  # Use configurable threshold (default 0.5)
         return [
-            det for det in yolo_results["weapons"]
+            det
+            for det in yolo_results["weapons"]
             if det["confidence"] >= weapon_conf
         ]
 
@@ -471,12 +547,19 @@ class DetectionService:
         self,
         frame: np.ndarray,
         frame_timestamp: datetime,
+        min_confidence: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Detect weapons in a frame (standalone, for backward compat)."""
         if self.weapon_model is None:
             return []
-        results = self.run_yolo_shared(frame)
-        return self._extract_weapons(results)
+        weapon_conf = (
+            float(min_confidence)
+            if min_confidence is not None
+            else self.confidence_threshold
+        )
+        yolo_conf = max(0.01, min(weapon_conf, 0.25))
+        results = self.run_yolo_shared(frame, conf=yolo_conf)
+        return self._extract_weapons(results, weapon_conf)
 
     # ==================================================================
     # 2. Violence / aggression detection  (Conv3D trained model)
@@ -833,10 +916,14 @@ class DetectionService:
             value = metadata.get("density", 0.0) if metadata else 0.0
 
         defaults = self.DEFAULT_THRESHOLDS.get(detection_type, (None, None, None))
-        if company_thresholds:
-            ct = company_thresholds.get("critical_threshold") or defaults[0]
-            ht = company_thresholds.get("high_threshold") or defaults[1]
-            mt = company_thresholds.get("medium_threshold") or defaults[2]
+        # Company row from DB includes these keys (possibly None). Do not use
+        # `x or default` — that replaced an explicit unset with DEFAULT_THRESHOLDS.
+        if company_thresholds and "critical_threshold" in company_thresholds:
+            ct = company_thresholds.get("critical_threshold")
+            ht = company_thresholds.get("high_threshold")
+            mt = company_thresholds.get("medium_threshold")
+            if ct is None and ht is None and mt is None:
+                ct, ht, mt = defaults
         else:
             ct, ht, mt = defaults
 

@@ -37,8 +37,12 @@ async def lifespan(app: FastAPI):
             logger.warning("Startup retention cleanup failed: %s", e)
 
     yield
-    # Shutdown: Cleanup if needed
-    pass
+    # Shutdown: stop inference worker threads (avoids orphaned processes on reload / kill)
+    try:
+        from app.services.detection_service import detection_service
+        detection_service._inference_pool.shutdown(wait=True)
+    except Exception as e:
+        logger.warning("Inference executor shutdown: %s", e)
 
 
 app = FastAPI(
