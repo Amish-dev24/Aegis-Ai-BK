@@ -43,6 +43,13 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _crowd_heatmap_frame_weight() -> float:
+    """Frame alpha for crowd heatmap blend (matches ``CROWD_HEATMAP_FRAME_WEIGHT``)."""
+    fw = float(getattr(settings, "CROWD_HEATMAP_FRAME_WEIGHT", 0.65))
+    return min(max(fw, 0.0), 1.0)
+
+
 router = APIRouter(prefix="/video", tags=["video-processing"])
 
 _thread_pool = ThreadPoolExecutor(max_workers=2)
@@ -476,13 +483,19 @@ def _process_video_sync(job_id: str):
                             annotated = frame
                             # Still apply heatmap if available (even without other detections)
                             if heatmap_overlay is not None:
-                                annotated = cv2.addWeighted(annotated, 0.6, heatmap_overlay, 0.4, 0)
+                                fw = _crowd_heatmap_frame_weight()
+                                annotated = cv2.addWeighted(
+                                    annotated, fw, heatmap_overlay, 1.0 - fw, 0
+                                )
                         writer.write(annotated)
                         
                         # Write heatmap video for every frame (persist last heatmap for non-analyzed frames)
                         if heatmap_writer is not None:
                             if heatmap_overlay is not None:
-                                heatmap_frame = cv2.addWeighted(frame, 0.6, heatmap_overlay, 0.4, 0)
+                                fw = _crowd_heatmap_frame_weight()
+                                heatmap_frame = cv2.addWeighted(
+                                    frame, fw, heatmap_overlay, 1.0 - fw, 0
+                                )
                             else:
                                 # Write plain frame if no heatmap available yet
                                 heatmap_frame = frame

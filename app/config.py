@@ -29,8 +29,29 @@ class Settings(BaseSettings):
     # Detection Models
     MODEL_PATH: str = "./models/weapon-box-bags-v3.pt"         # YOLO — Bags, Box, Weapons (v3)
     FACE_MODEL_PATH: str = "./models/face_detection.pt"        # YOLOv8 — covered, uncovered
-    CROWD_MODEL_PATH: str = "./models/csrnet_crowd.pth.tar"    # CSRNet density estimator
-    CROWD_INFERENCE_MAX_SIDE: int = 512  # CSRNet input: longer side in px (4:3, e.g. 512x384)
+    # Prefer .pth + auto single-file ONNX if split .onnx/.onnx.data is broken; or set path to merged .onnx only
+    CROWD_MODEL_PATH: str = "./models/sanet_partB_best.onnx"
+    # "sanet" (default, ShanghaiTech Part-B) | "csrnet" (ImageNet norm + VGG CSRNet weights)
+    CROWD_MODEL_ARCH: str = "sanet"
+    CROWD_INFERENCE_MAX_SIDE: int = 640  # SANet + calibration YOLO use this max side on CPU (faster than full HD)
+    # False = resize SANet + YOLO calibration to CROWD_INFERENCE_MAX_SIDE (recommended on CPU). True = notebook full-res (slow)
+    CROWD_SANET_FULL_FRAME: bool = False
+    # Match notebook: YOLO(first_frame, verbose=False), count cls==0, SCALE=person_count/raw_sum once
+    CROWD_SANET_NOTEBOOK_CALIBRATION: bool = True
+    # SANet: scale raw map sum to match YOLO person count (see flags above)
+    CROWD_AUTO_CALIBRATE: bool = True
+    # Local .pt path if you have it; if missing, Ultralytics auto-downloads yolov8n.pt (network once)
+    CROWD_CALIBRATION_YOLO_PATH: str = "./models/yolov8n.pt"
+    # Used only when CROWD_SANET_NOTEBOOK_CALIBRATION is false (multi-frame tuning)
+    CROWD_CALIBRATION_YOLO_CONF: float = 0.45
+    CROWD_CALIBRATION_YOLO_IMGSZ: int = 960
+    CROWD_CALIBRATION_SAMPLE_FRAMES: int = 8
+    # If you know headcount (e.g. 22), set this to skip YOLO drift: scale = EXPECTED / raw_sum
+    CROWD_CALIBRATION_EXPECTED_COUNT: Optional[int] = None
+    CROWD_CALIBRATION_SCALE: float = 1.0  # Used when auto-calibration is off or YOLO weights are missing
+    # Heatmap (matches SANet notebook: resize → clip → /max → COLORMAP_JET → blend)
+    CROWD_HEATMAP_COLORMAP: str = "jet"  # jet | hot | inferno
+    CROWD_HEATMAP_FRAME_WEIGHT: float = 0.65  # cv2.addWeighted: frame alpha (overlay gets 1 - this)
     POSE_MODEL_PATH: str = "./models/pose_estimation.pb"       # MediaPipe (optional)
     CONFIDENCE_THRESHOLD: float = 0.5
     ABANDONED_OBJECT_THRESHOLD_SECONDS: int = 60
