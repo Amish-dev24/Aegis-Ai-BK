@@ -250,6 +250,9 @@ def _run_analysis(
 
     for det_type, det in all_raw:
         dt_elapsed = (timestamp - last_detection_time.get(det_type, datetime.min)).total_seconds()
+        is_cached_crowd = (
+            det_type == DetectionType.CROWD_DENSITY and bool(det.get("_crowd_cached", False))
+        )
         
         # Skip dedup for crowd_density — process every frame
         if det_type != DetectionType.CROWD_DENSITY and dt_elapsed < dedup_interval:
@@ -259,7 +262,8 @@ def _run_analysis(
         confidence = det.get("confidence", 0.0)
         module_settings = enabled_modules.get(det_type.value, {})
         min_conf = module_settings.get("min_confidence")
-        if min_conf is not None and confidence < min_conf:
+        # Crowd density uses count/density semantics; don't drop it via generic confidence gate.
+        if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
             continue
 
         threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
@@ -267,9 +271,41 @@ def _run_analysis(
 
         # Extract density map for heatmap generation (before saving to DB)
         density_map_normalized = det.get("density_map_normalized")
+        if det_type == DetectionType.CROWD_DENSITY and density_map_normalized is not None:
+            heatmap_overlay = video_service.generate_crowd_heatmap(
+                full_frame, density_map_normalized,
+                count=det.get("count", 0),
+                density=det.get("density", 0.0)
+            )
+
+        # Cached crowd results are only for visualization speed; skip DB/evidence/alerts.
+        if is_cached_crowd:
+            if det_type == DetectionType.CROWD_DENSITY and getattr(settings, "CROWD_DEBUG_LOG", False):
+                logger.warning(
+                    "[crowd debug] frame=%s count=%s density=%.6f cached=%s persisted=%s",
+                    job.get("current_frame", -1),
+                    det.get("count"),
+                    float(det.get("density") or 0.0),
+                    True,
+                    False,
+                )
+            det_entry = {
+                "det_type": det_type.value,
+                "confidence": confidence,
+                "bbox": bbox,
+                "class_name": det.get("class", det_type.value),
+                "count": det.get("count", 0),
+                "density": det.get("density", 0.0),
+            }
+            active_detections.append(det_entry)
+            continue
         
         # Remove non-JSON-serializable fields before saving to database
-        det_for_db = {k: v for k, v in det.items() if k != "density_map_normalized"}
+        det_for_db = {
+            k: v
+            for k, v in det.items()
+            if k not in ("density_map_normalized", "_crowd_cached")
+        }
 
         db_detection = Detection(
             camera_id=camera_id,
@@ -287,26 +323,32 @@ def _run_analysis(
         db.add(db_detection)
         db.flush()
 
-        # Capture heatmap for crowd density detections (use extracted density map)
-        if det_type == DetectionType.CROWD_DENSITY and density_map_normalized is not None:
-            heatmap_overlay = video_service.generate_crowd_heatmap(
-                full_frame, density_map_normalized, 
-                count=det_for_db.get("count", 0),
-                density=det_for_db.get("density", 0.0)
+        if det_type == DetectionType.CROWD_DENSITY and getattr(settings, "CROWD_DEBUG_LOG", False):
+            logger.warning(
+                "[crowd debug] frame=%s count=%s density=%.6f cached=%s persisted=%s",
+                job.get("current_frame", -1),
+                det.get("count"),
+                float(det.get("density") or 0.0),
+                False,
+                True,
             )
 
-        label = f"{det.get('class', det_type.value)} {confidence:.0%}"
-        snapshot_path = video_service.save_snapshot(
-            full_frame, db_detection.id, prefix=det_type.value,
-            bbox=bbox, label=label,
-        )
-        db_evidence = Evidence(
-            detection_id=db_detection.id,
-            image_path=snapshot_path,
-            metadata_json=str(det),
-        )
-        db.add(db_evidence)
-        db.flush()
+        snapshot_path = None
+        db_evidence = None
+        save_crowd_evidence = bool(getattr(settings, "CROWD_SAVE_EVIDENCE", False))
+        if det_type != DetectionType.CROWD_DENSITY or save_crowd_evidence:
+            label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+            snapshot_path = video_service.save_snapshot(
+                full_frame, db_detection.id, prefix=det_type.value,
+                bbox=bbox, label=label,
+            )
+            db_evidence = Evidence(
+                detection_id=db_detection.id,
+                image_path=snapshot_path,
+                metadata_json=str(det),
+            )
+            db.add(db_evidence)
+            db.flush()
 
         # Check which threat levels should trigger alerts (company setting)
         alert_levels_str = module_settings.get("alert_on_levels", "medium,high,critical")
@@ -363,7 +405,7 @@ def _run_analysis(
             "threat_level": threat_level.value,
             "confidence": round(confidence, 4),
             "class": det.get("class", det_type.value),
-            "evidence_id": db_evidence.id,
+            "evidence_id": db_evidence.id if db_evidence else None,
             "timestamp": timestamp.isoformat(),
             "frame_number": job.get("current_frame", 0),
         })
@@ -423,6 +465,14 @@ def _process_video_sync(job_id: str):
         company_id = job["company_id"]
 
         enabled_modules = detection_service.get_enabled_modules(db, company_id)
+        if getattr(settings, "CROWD_DEBUG_LOG", False):
+            logger.warning(
+                "[crowd debug] job=%s company=%s crowd_enabled=%s modules=%s",
+                job_id,
+                company_id,
+                "crowd_density" in enabled_modules,
+                sorted(enabled_modules.keys()),
+            )
 
         # Apply company-configured abandoned object threshold
         ab_settings = enabled_modules.get("abandoned_object", {})

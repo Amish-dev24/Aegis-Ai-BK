@@ -24,7 +24,7 @@ import torch.nn as nn
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import threading
 import logging
 from app.config import settings
@@ -249,6 +249,10 @@ class DetectionService:
         self._crowd_calibration_yolo = None  # YOLOv8n for SANet auto-calibration
         self._crowd_cal_yolo_attempts = 0  # max 2 tries (startup + first crowd frame)
         self._crowd_calib_lock = threading.Lock()
+        self._crowd_skip_counter = 0
+        self._last_crowd_result: Optional[Dict[str, Any]] = None
+        self._crowd_future = None  # async crowd task (non-blocking collection in detect_all_parallel)
+        self._crowd_disabled_warned = False  # avoid spamming when module is disabled by settings
         self.pose_model = None         # MediaPipe Pose
         self.mp_pose = None
         self.violence_onnx_session = None  # Conv3D violence classifier (ONNX)
@@ -718,6 +722,40 @@ class DetectionService:
 
         return {"weapons": weapons, "bags_boxes": bags_boxes, "all_boxes": all_boxes}
 
+    def _finalize_async_crowd_result(self, wait_for_first: bool = False) -> None:
+        """
+        Collect completed thread-pool crowd work into ``_last_crowd_result``.
+
+        When ``wait_for_first`` is True and we have never stored a result yet, block up to
+        ``CROWD_INFERENCE_TIMEOUT_SECONDS`` so the first analyzed frame (or a one-frame
+        job) still receives a crowd row. Without this, async results only appeared on the
+        *next* call to ``detect_all_parallel``.
+        """
+        if self._crowd_future is None:
+            return
+        fut = self._crowd_future
+        if fut.done():
+            try:
+                self._last_crowd_result = fut.result()
+            except Exception as e:
+                logger.warning("Async crowd_density failed: %s", e)
+            finally:
+                self._crowd_future = None
+            return
+        if wait_for_first and self._last_crowd_result is None:
+            timeout = float(getattr(settings, "CROWD_INFERENCE_TIMEOUT_SECONDS", 60))
+            try:
+                self._last_crowd_result = fut.result(timeout=timeout)
+            except FuturesTimeoutError:
+                logger.warning(
+                    "Crowd inference timed out after %ss — no crowd result yet; will retry next frame",
+                    timeout,
+                )
+            except Exception as e:
+                logger.warning("Async crowd_density failed: %s", e)
+            finally:
+                self._crowd_future = None
+
     # ==================================================================
     # Parallel detection — run all enabled modules concurrently
     # ==================================================================
@@ -742,9 +780,11 @@ class DetectionService:
 
         # Skip near-duplicate frames for speed — but not when weapon/abandoned YOLO runs:
         # small objects (guns) barely move the correlation score frame-to-frame.
+        # Also do not skip when crowd_density is enabled: similarity would return [] before
+        # crowd runs, so videos looked like they had no crowd at all.
         need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
         similar = self.is_frame_similar(frame)
-        if similar and not need_yolo:
+        if similar and not need_yolo and "crowd_density" not in enabled_modules:
             return []
 
         weapon_min = enabled_modules.get("weapon", {}).get("min_confidence")
@@ -781,11 +821,45 @@ class DetectionService:
             )
 
         if "crowd_density" in enabled_modules:
-            # CSRNet needs ORIGINAL resolution frame for accurate scale factor
-            crowd_frame = full_frame if full_frame is not None else frame
-            futures["crowd_density"] = self._inference_pool.submit(
-                self.calculate_crowd_density, crowd_frame, frame_timestamp
+            self._crowd_disabled_warned = False
+            prev_crowd_result = self._last_crowd_result
+            # Pick up async result from the previous analyzed frame (if it finished).
+            self._finalize_async_crowd_result(wait_for_first=False)
+
+            crowd_every_n = max(
+                1, int(getattr(settings, "CROWD_EVERY_N_ANALYSIS_FRAMES", 1))
             )
+            self._crowd_skip_counter = (self._crowd_skip_counter + 1) % crowd_every_n
+            should_run_crowd = (
+                self._crowd_skip_counter == 0 or self._last_crowd_result is None
+            )
+
+            if should_run_crowd and self._crowd_future is None:
+                # Submit crowd model asynchronously; do not block frame loop.
+                crowd_frame = full_frame if full_frame is not None else frame
+                self._crowd_future = self._inference_pool.submit(
+                    self.calculate_crowd_density, crowd_frame, frame_timestamp
+                )
+
+            # Same-frame completion + first-result wait (single-frame / first analyzed frame).
+            self._finalize_async_crowd_result(wait_for_first=True)
+
+            # Reuse previous crowd result every frame (until next async result arrives).
+            if self._last_crowd_result is not None:
+                crowd_out = dict(self._last_crowd_result)
+                is_fresh_result = (
+                    prev_crowd_result is None or prev_crowd_result is not self._last_crowd_result
+                )
+                # Mark as cached only when we are reusing the exact previous value.
+                if not is_fresh_result:
+                    crowd_out["_crowd_cached"] = True
+                all_results.append((DetectionType.CROWD_DENSITY, crowd_out))
+        elif getattr(settings, "CROWD_DEBUG_LOG", False) and not self._crowd_disabled_warned:
+            logger.warning(
+                "[crowd debug] crowd_density is not enabled for this company/job. enabled_modules=%s",
+                sorted(enabled_modules.keys()),
+            )
+            self._crowd_disabled_warned = True
 
         if "violence" in enabled_modules:
             futures["violence"] = self._inference_pool.submit(
@@ -795,7 +869,8 @@ class DetectionService:
         # Step 3: Collect results
         for module, future in futures.items():
             try:
-                result = future.result(timeout=30)
+                timeout_s = 30
+                result = future.result(timeout=timeout_s)
 
                 if module == "weapon":
                     for det in result:
@@ -806,14 +881,14 @@ class DetectionService:
                 elif module == "mask_face":
                     for det in result:
                         all_results.append((DetectionType.MASK_FACE, det))
-                elif module == "crowd_density":
-                    if result.get("density_map_normalized") is not None or result.get(
-                        "count", 0
-                    ) > 0:
-                        all_results.append((DetectionType.CROWD_DENSITY, result))
                 elif module == "violence":
                     if result["is_violent"]:
                         all_results.append((DetectionType.VIOLENCE, result))
+            except FuturesTimeoutError:
+                future.cancel()
+                logger.warning(
+                    "Module %s timed out after %ss", module, timeout_s
+                )
             except Exception as e:
                 logger.warning("Module %s failed: %s", module, e)
 
@@ -1366,7 +1441,7 @@ class DetectionService:
         DetectionType.VIOLENCE:         (0.8, 0.65, 0.5),
         DetectionType.ABANDONED_OBJECT: (None, 0.8, 0.5),   # No CRITICAL for abandoned
         DetectionType.MASK_FACE:        (None, None, 0.9),   # Max MEDIUM for face/mask
-        DetectionType.CROWD_DENSITY:    (None, 0.9, 0.7),    # Uses density value
+        DetectionType.CROWD_DENSITY:    (None, 0.9, 0.7),    # Uses count/scaled or density (see classify_threat_level)
     }
 
     def classify_threat_level(
@@ -1378,8 +1453,14 @@ class DetectionService:
     ) -> ThreatLevel:
         """Classify threat level based on detection type and confidence."""
         value = confidence
+        crowd_count = float((metadata or {}).get("count", 0) or 0)
+        crowd_scale = float(getattr(settings, "CROWD_THREAT_MAX_PEOPLE_SCALE", 100.0))
+        use_people_count = bool(getattr(settings, "CROWD_THREAT_USE_PEOPLE_COUNT", True))
         if detection_type == DetectionType.CROWD_DENSITY:
-            value = metadata.get("density", 0.0) if metadata else 0.0
+            if use_people_count:
+                value = min(1.0, crowd_count / crowd_scale) if crowd_scale > 0 else 0.0
+            else:
+                value = metadata.get("density", 0.0) if metadata else 0.0
 
         defaults = self.DEFAULT_THRESHOLDS.get(detection_type, (None, None, None))
         # Company row from DB includes these keys (possibly None). Do not use
@@ -1392,6 +1473,27 @@ class DetectionService:
                 ct, ht, mt = defaults
         else:
             ct, ht, mt = defaults
+
+        # Crowd supports two threshold styles when using people-count mode:
+        # - Absolute people counts (e.g. 20 / 100 / 1000)
+        # - Legacy 0..1 normalized values (converted by CROWD_THREAT_MAX_PEOPLE_SCALE)
+        if detection_type == DetectionType.CROWD_DENSITY and use_people_count:
+            def to_people_threshold(t: Optional[float]) -> Optional[float]:
+                if t is None:
+                    return None
+                return float(t) if float(t) > 1.0 else float(t) * max(crowd_scale, 0.0)
+
+            ct_people = to_people_threshold(ct)
+            ht_people = to_people_threshold(ht)
+            mt_people = to_people_threshold(mt)
+
+            if ct_people is not None and crowd_count >= ct_people:
+                return ThreatLevel.CRITICAL
+            if ht_people is not None and crowd_count >= ht_people:
+                return ThreatLevel.HIGH
+            if mt_people is not None and crowd_count >= mt_people:
+                return ThreatLevel.MEDIUM
+            return ThreatLevel.LOW
 
         if ct is not None and value >= ct:
             return ThreatLevel.CRITICAL

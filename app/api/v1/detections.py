@@ -277,7 +277,7 @@ async def process_video(
 
                 # Skip if below company's custom min_confidence
                 min_conf = module_settings.get("min_confidence")
-                if min_conf is not None and confidence < min_conf:
+                if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
                     continue
 
                 threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
@@ -450,7 +450,7 @@ async def process_image(
 
         # Skip if below company's custom min_confidence
         min_conf = module_settings.get("min_confidence")
-        if min_conf is not None and confidence < min_conf:
+        if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
             continue
 
         threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)

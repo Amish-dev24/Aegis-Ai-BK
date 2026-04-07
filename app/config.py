@@ -33,7 +33,13 @@ class Settings(BaseSettings):
     CROWD_MODEL_PATH: str = "./models/sanet_partB_best.onnx"
     # "sanet" (default, ShanghaiTech Part-B) | "csrnet" (ImageNet norm + VGG CSRNet weights)
     CROWD_MODEL_ARCH: str = "sanet"
-    CROWD_INFERENCE_MAX_SIDE: int = 640  # SANet + calibration YOLO use this max side on CPU (faster than full HD)
+    CROWD_INFERENCE_MAX_SIDE: int = 512  # Speed profile for CPU; increase only if you need more detail
+    # Performance: run SANet every N analyzed frames and reuse previous crowd result
+    CROWD_EVERY_N_ANALYSIS_FRAMES: int = 20
+    # Max wait for one crowd inference task before reusing last result
+    CROWD_INFERENCE_TIMEOUT_SECONDS: int = 20
+    # Persistence tuning: skip heavy snapshot/evidence writes for crowd detections by default
+    CROWD_SAVE_EVIDENCE: bool = True
     # False = resize SANet + YOLO calibration to CROWD_INFERENCE_MAX_SIDE (recommended on CPU). True = notebook full-res (slow)
     CROWD_SANET_FULL_FRAME: bool = False
     # Match notebook: YOLO(first_frame, verbose=False), count cls==0, SCALE=person_count/raw_sum once
@@ -52,6 +58,12 @@ class Settings(BaseSettings):
     # Heatmap (matches SANet notebook: resize → clip → /max → COLORMAP_JET → blend)
     CROWD_HEATMAP_COLORMAP: str = "jet"  # jet | hot | inferno
     CROWD_HEATMAP_FRAME_WEIGHT: float = 0.65  # cv2.addWeighted: frame alpha (overlay gets 1 - this)
+    # Terminal debug for video pipeline (count, density, cached, persisted)
+    CROWD_DEBUG_LOG: bool = True
+    # Threat levels for crowd: use estimated people count vs density ratio
+    CROWD_THREAT_USE_PEOPLE_COUNT: bool = True
+    # value = min(1, count / CROWD_THREAT_MAX_PEOPLE_SCALE) for threshold compare (e.g. 0.7 high ≈ 70 people if scale=100)
+    CROWD_THREAT_MAX_PEOPLE_SCALE: float = 100.0
     POSE_MODEL_PATH: str = "./models/pose_estimation.pb"       # MediaPipe (optional)
     CONFIDENCE_THRESHOLD: float = 0.5
     ABANDONED_OBJECT_THRESHOLD_SECONDS: int = 60
