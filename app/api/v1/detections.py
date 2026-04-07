@@ -260,7 +260,9 @@ async def process_video(
             # --- 5. Crowd density monitoring ---
             if "crowd_density" in enabled_modules:
                 crowd = detection_service.calculate_crowd_density(frame, timestamp)
-                if crowd["count"] > 0:
+                if crowd.get("density_map_normalized") is not None or crowd.get(
+                    "count", 0
+                ) > 0:
                     all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
 
             # Persist detections (deduplicated — skip if same type detected within 2 sec)
@@ -275,7 +277,7 @@ async def process_video(
 
                 # Skip if below company's custom min_confidence
                 min_conf = module_settings.get("min_confidence")
-                if min_conf is not None and confidence < min_conf:
+                if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
                     continue
 
                 threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
@@ -438,7 +440,7 @@ async def process_image(
 
     if "crowd_density" in enabled_modules:
         crowd = detection_service.calculate_crowd_density(frame, timestamp)
-        if crowd["count"] > 0:
+        if crowd.get("density_map_normalized") is not None or crowd.get("count", 0) > 0:
             all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
 
     # Save detections
@@ -448,7 +450,7 @@ async def process_image(
 
         # Skip if below company's custom min_confidence
         min_conf = module_settings.get("min_confidence")
-        if min_conf is not None and confidence < min_conf:
+        if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
             continue
 
         threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)

@@ -202,7 +202,9 @@ class VideoService:
 
         # Apply heatmap overlay first (if crowd density detection exists)
         if heatmap_overlay is not None and heatmap_overlay.shape[:2] == (h, w):
-            annotated = cv2.addWeighted(annotated, 0.6, heatmap_overlay, 0.4, 0)
+            fw = float(getattr(settings, "CROWD_HEATMAP_FRAME_WEIGHT", 0.65))
+            fw = min(max(fw, 0.0), 1.0)
+            annotated = cv2.addWeighted(annotated, fw, heatmap_overlay, 1.0 - fw, 0)
 
         # Draw crowd count/density text from crowd_density detections
         for det in detections:
@@ -282,16 +284,22 @@ class VideoService:
         
         h, w = frame.shape[:2]
         
-        # Resize density map to match frame size
+        # Resize density map to match frame size (LINEAR matches SANet notebook resize)
         if density_map_normalized.shape != (h, w):
             density_resized = cv2.resize(
-                density_map_normalized, (w, h), interpolation=cv2.INTER_CUBIC
+                density_map_normalized, (w, h), interpolation=cv2.INTER_LINEAR
             )
         else:
             density_resized = density_map_normalized
-        
-        # Apply colormap (HOT = blue→red, like CSRNet visualization)
-        heatmap_colored = cv2.applyColorMap(density_resized, cv2.COLORMAP_HOT)
+
+        cmap_name = getattr(settings, "CROWD_HEATMAP_COLORMAP", "jet").lower()
+        cmap = {
+            "jet": cv2.COLORMAP_JET,
+            "hot": cv2.COLORMAP_HOT,
+            "inferno": cv2.COLORMAP_INFERNO,
+            "viridis": cv2.COLORMAP_VIRIDIS,
+        }.get(cmap_name, cv2.COLORMAP_JET)
+        heatmap_colored = cv2.applyColorMap(density_resized, cmap)
         
         # Add text overlay with crowd count and density percentage
         font = cv2.FONT_HERSHEY_SIMPLEX
