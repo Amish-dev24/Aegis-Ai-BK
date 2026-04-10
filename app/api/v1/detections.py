@@ -13,6 +13,7 @@ from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.camera import Camera
 from app.models.user import User
 from app.services.detection_service import detection_service
+from app.services.violence_model import ViolenceClassifier
 from app.services.video_service import video_service
 from app.services.email_service import email_service
 from app.models.alert import Alert, AlertStatus
@@ -224,6 +225,11 @@ async def process_video(
 
         # Get enabled modules (respects global + company settings)
         enabled_modules = detection_service.get_enabled_modules(db, camera.company_id)
+        prev_buf_max = (
+            max(0, ViolenceClassifier.NUM_FRAMES - 1)
+            if "violence" in enabled_modules
+            else 10
+        )
 
         for frame, timestamp in video_service.read_video_file(str(upload_path)):
             frame_index += 1
@@ -352,9 +358,9 @@ async def process_video(
                 })
                 detections_created += 1
 
-            # Keep a sliding window of previous frames for temporal analysis
+            # Sliding window: Conv3D violence needs 15 prior frames (+ current passed above).
             previous_frames.append(frame)
-            if len(previous_frames) > 10:
+            if len(previous_frames) > prev_buf_max:
                 previous_frames.pop(0)
 
         # Audit log for video processing
