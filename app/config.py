@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     WEAPON_VIDEO_AI_MAX_SIDE: int = 640
     # Fixed export size for ONNX (must match exported graph)
     ONNX_YOLO_IMGSZ: int = 640
+    # ONNX Runtime: use CUDA when ``onnxruntime-gpu`` is installed and a GPU is visible
+    ONNX_PREFER_GPU: bool = True
+    # Ultralytics ``.pt`` / PyTorch weights: move to CUDA when available
+    TORCH_PREFER_GPU: bool = True
     
     # File Storage
     UPLOAD_DIR: str = "./uploads"

@@ -9,7 +9,7 @@ Models used:
 - MOG2 background subtraction    — abandoned object detection
 
 Performance optimizations:
-- ONNX Runtime for YOLO on CPU (faster than raw PyTorch)
+- ONNX Runtime for YOLO / crowd / violence ONNX (CUDA when ``onnxruntime-gpu`` + GPU present, else CPU)
 - YOLO runs ONCE per frame; results shared between weapon + abandoned object detection
 - All model inferences run in parallel via ThreadPoolExecutor
 - MediaPipe model_complexity=0 (fastest)
@@ -66,9 +66,11 @@ try:
     # Optimize thread count for CPU — use physical cores (not hyperthreads)
     cpu_cores = os.cpu_count() or 4
     ort.set_default_logger_severity(3)  # suppress verbose logs
-    logger.info("ONNX Runtime available — using accelerated inference (%d CPU threads)", cpu_cores)
+    logger.info("ONNX Runtime loaded (%d CPU threads for CPU-only sessions)", cpu_cores)
 except ImportError:
     ORT_AVAILABLE = False
+    ort = None  # type: ignore
+    cpu_cores = os.cpu_count() or 4
     logger.warning("onnxruntime not installed — using PyTorch (slower). Install with: pip install onnxruntime")
 
 # Optimize PyTorch CPU threads (for CSRNet fallback)
@@ -132,17 +134,75 @@ def _strip_module_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _make_cpu_ort_session(model_path: Path):
-    """CPU-optimized ONNX Runtime session (graph fusion + thread pinning). Prefer over raw PyTorch on Intel CPUs."""
-    if not ORT_AVAILABLE:
+def _resolve_ort_providers() -> List[str]:
+    """
+    Prefer CUDA when ``onnxruntime-gpu`` is installed and ``ONNX_PREFER_GPU`` is true.
+    CPU-only wheels expose only ``CPUExecutionProvider``.
+    """
+    if not ORT_AVAILABLE or ort is None:
+        return ["CPUExecutionProvider"]
+    prefer = bool(getattr(settings, "ONNX_PREFER_GPU", True))
+    if not prefer:
+        return ["CPUExecutionProvider"]
+    try:
+        available = set(ort.get_available_providers())
+    except Exception:
+        return ["CPUExecutionProvider"]
+    if "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
+def _make_ort_session(model_path: Path):
+    """ONNX Runtime session: GPU (CUDA) when available, else CPU with thread pinning."""
+    if not ORT_AVAILABLE or ort is None:
         raise RuntimeError("ONNX Runtime not available")
+    providers = _resolve_ort_providers()
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    so.intra_op_num_threads = cpu_cores
-    so.inter_op_num_threads = max(1, cpu_cores // 2)
-    return ort.InferenceSession(
-        str(model_path), sess_options=so, providers=["CPUExecutionProvider"]
-    )
+    if providers == ["CPUExecutionProvider"]:
+        so.intra_op_num_threads = cpu_cores
+        so.inter_op_num_threads = max(1, cpu_cores // 2)
+    try:
+        sess = ort.InferenceSession(
+            str(model_path), sess_options=so, providers=providers
+        )
+    except Exception as e:
+        if len(providers) > 1:
+            logger.warning(
+                "ONNX session with GPU failed (%s), retrying CPU-only for %s",
+                e,
+                model_path.name,
+            )
+            so_cpu = ort.SessionOptions()
+            so_cpu.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            so_cpu.intra_op_num_threads = cpu_cores
+            so_cpu.inter_op_num_threads = max(1, cpu_cores // 2)
+            sess = ort.InferenceSession(
+                str(model_path),
+                sess_options=so_cpu,
+                providers=["CPUExecutionProvider"],
+            )
+        else:
+            raise
+    active = sess.get_providers()
+    logger.info("ONNX Runtime active providers for %s: %s", model_path.name, active)
+    return sess
+
+
+def _try_move_yolo_to_cuda(model: Any, model_name: str) -> None:
+    """Move Ultralytics YOLO ``.pt`` model to CUDA when configured and available."""
+    if model is None:
+        return
+    if not getattr(settings, "TORCH_PREFER_GPU", True):
+        return
+    if not torch.cuda.is_available():
+        return
+    try:
+        model.to("cuda")
+        logger.info("%s: Ultralytics model on CUDA", model_name)
+    except Exception as e:
+        logger.warning("%s: could not use CUDA (%s), using CPU", model_name, e)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +381,7 @@ class DetectionService:
 
         try:
             model = YOLO(str(pt_path))
+            _try_move_yolo_to_cuda(model, model_name)
             logger.info("%s loaded from PyTorch: %s — classes: %s", model_name, pt_path, model.names)
             return model, None
         except Exception as e:
@@ -358,7 +419,7 @@ class DetectionService:
 
         if ORT_AVAILABLE and onnx_path.exists():
             try:
-                self._bind_crowd_onnx_session(_make_cpu_ort_session(onnx_path))
+                self._bind_crowd_onnx_session(_make_ort_session(onnx_path))
                 logger.info("CSRNet loaded from ONNX: %s", onnx_path)
                 return
             except Exception as e:
@@ -398,7 +459,7 @@ class DetectionService:
                     output_names=["density_map"],
                     dynamic_axes={"input": {2: "height", 3: "width"}},
                 )
-                self._bind_crowd_onnx_session(_make_cpu_ort_session(onnx_path))
+                self._bind_crowd_onnx_session(_make_ort_session(onnx_path))
                 logger.info("CSRNet ONNX export complete: %s", onnx_path)
                 return
             except Exception as e:
@@ -446,7 +507,7 @@ class DetectionService:
             except TypeError:
                 torch.onnx.export(pt_model, dummy, str(tmp), **export_kw)
             tmp.replace(out_path)
-            self._bind_crowd_onnx_session(_make_cpu_ort_session(out_path))
+            self._bind_crowd_onnx_session(_make_ort_session(out_path))
             logger.info("SANet single-file ONNX ready (ORT): %s", out_path)
             return True
         except Exception as e:
@@ -469,7 +530,7 @@ class DetectionService:
         # 1) Try existing ONNX (must be single-file or accompanied by .onnx.data)
         if ORT_AVAILABLE and onnx_path.exists():
             try:
-                self._bind_crowd_onnx_session(_make_cpu_ort_session(onnx_path))
+                self._bind_crowd_onnx_session(_make_ort_session(onnx_path))
                 logger.info("SANet loaded from ONNX: %s", onnx_path)
                 return
             except Exception as e:
@@ -547,6 +608,7 @@ class DetectionService:
             from ultralytics import YOLO
 
             self._crowd_calibration_yolo = YOLO(load_target)
+            _try_move_yolo_to_cuda(self._crowd_calibration_yolo, "Crowd calibration YOLO")
             logger.info("Crowd calibration YOLO ready: %s", load_target)
         except Exception as e:
             logger.warning(
@@ -592,9 +654,7 @@ class DetectionService:
         violence_pt_path = Path("./models/violence_model.pt")
         if ORT_AVAILABLE and violence_onnx_path.exists():
             try:
-                self.violence_onnx_session = ort.InferenceSession(
-                    str(violence_onnx_path), providers=["CPUExecutionProvider"],
-                )
+                self.violence_onnx_session = _make_ort_session(violence_onnx_path)
                 logger.info("Violence model loaded from ONNX: %s", violence_onnx_path)
             except Exception as e:
                 logger.warning("Failed to load violence ONNX: %s", e)
@@ -614,9 +674,7 @@ class DetectionService:
                     torch.onnx.export(vc, dummy, str(violence_onnx_path), opset_version=18,
                                       input_names=["video_clip"], output_names=["prediction"],
                                       dynamic_axes={"video_clip": {0: "batch"}}, dynamo=False)
-                    self.violence_onnx_session = ort.InferenceSession(
-                        str(violence_onnx_path), providers=["CPUExecutionProvider"],
-                    )
+                    self.violence_onnx_session = _make_ort_session(violence_onnx_path)
                     logger.info("Violence ONNX export complete: %s", violence_onnx_path)
                 else:
                     # Keep PyTorch model as fallback
