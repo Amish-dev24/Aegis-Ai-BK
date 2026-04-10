@@ -260,9 +260,7 @@ async def process_video(
             # --- 5. Crowd density monitoring ---
             if "crowd_density" in enabled_modules:
                 crowd = detection_service.calculate_crowd_density(frame, timestamp)
-                if crowd.get("density_map_normalized") is not None or crowd.get(
-                    "count", 0
-                ) > 0:
+                if int(crowd.get("count", 0) or 0) > 0:
                     all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
 
             # Persist detections (deduplicated — skip if same type detected within 2 sec)
@@ -440,7 +438,7 @@ async def process_image(
 
     if "crowd_density" in enabled_modules:
         crowd = detection_service.calculate_crowd_density(frame, timestamp)
-        if crowd.get("density_map_normalized") is not None or crowd.get("count", 0) > 0:
+        if int(crowd.get("count", 0) or 0) > 0:
             all_raw_detections.append((DetectionType.CROWD_DENSITY, crowd))
 
     # Save detections
