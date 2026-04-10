@@ -29,6 +29,7 @@ import threading
 import logging
 from app.config import settings
 from app.models.detection import DetectionType, ThreatLevel
+from app.services.violence_model import ViolenceClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +423,8 @@ class DetectionService:
         self.pose_model = None         # MediaPipe Pose
         self.mp_pose = None
         self.violence_onnx_session = None  # Conv3D violence classifier (ONNX)
+        self._violence_onnx_input_name: Optional[str] = None
+        self.violence_pt_model = None  # Conv3D when ORT missing (never use pose_model for this)
         self.bg_subtractor = None      # MOG2
 
         # Thread pool for parallel model inference (3 = YOLO + CSRNet + MediaPipe)
@@ -759,40 +762,79 @@ class DetectionService:
         else:
             logger.warning("Crowd model not found at %s — crowd density disabled", crowd_path)
 
-        # --- 4. Conv3D Violence classifier (trained on Real Life Violence dataset) ---
-        violence_onnx_path = Path("./models/violence_model.onnx")
-        violence_pt_path = Path("./models/violence_model.pt")
-        if ORT_AVAILABLE and violence_onnx_path.exists():
+        # --- 4. Conv3D Violence classifier (v2: violence_model_v2.pt → auto .onnx) ---
+        violence_pt_path = Path(getattr(settings, "VIOLENCE_MODEL_PT_PATH", "./models/violence_model_v2.pt"))
+        onnx_spec = getattr(settings, "VIOLENCE_MODEL_ONNX_PATH", None)
+        violence_onnx_path = (
+            Path(onnx_spec)
+            if (isinstance(onnx_spec, str) and onnx_spec.strip())
+            else violence_pt_path.with_suffix(".onnx")
+        )
+
+        def _bind_violence_onnx_session(session) -> None:
+            self.violence_onnx_session = session
+            self._violence_onnx_input_name = session.get_inputs()[0].name
+            logger.info("Violence ONNX input tensor: %s", self._violence_onnx_input_name)
+
+        def _export_violence_onnx(vc_module, out_path: Path) -> bool:
+            if not ORT_AVAILABLE:
+                return False
+            vc_module.eval()
+            vc_cpu = vc_module.cpu()
+            dummy = torch.randn(1, 3, 16, 64, 64)
+            export_kw: Dict[str, Any] = {
+                "opset_version": 18,
+                "input_names": ["video_clip"],
+                "output_names": ["prediction"],
+                "dynamic_axes": {"video_clip": {0: "batch"}},
+            }
             try:
-                self.violence_onnx_session = _make_ort_session(violence_onnx_path)
+                torch.onnx.export(
+                    vc_cpu, dummy, str(out_path), dynamo=False, **export_kw
+                )
+            except TypeError:
+                torch.onnx.export(vc_cpu, dummy, str(out_path), **export_kw)
+            _bind_violence_onnx_session(_make_ort_session(out_path))
+            logger.info("Violence ONNX export complete: %s", out_path)
+            return True
+
+        if ORT_AVAILABLE and violence_onnx_path.is_file():
+            try:
+                _bind_violence_onnx_session(_make_ort_session(violence_onnx_path))
                 logger.info("Violence model loaded from ONNX: %s", violence_onnx_path)
             except Exception as e:
                 logger.warning("Failed to load violence ONNX: %s", e)
-        elif violence_pt_path.exists():
+
+        if self.violence_onnx_session is None and violence_pt_path.is_file():
             try:
-                # Export to ONNX on first run
                 from app.services.violence_model import ViolenceClassifier as VC
+
                 vc = VC()
                 ckpt = torch.load(str(violence_pt_path), map_location="cpu", weights_only=False)
-                vc.load_state_dict(ckpt["model_state"])
+                state = ckpt.get("model_state") or ckpt.get("state_dict")
+                if state is None:
+                    raise KeyError("checkpoint missing model_state / state_dict")
+                vc.load_state_dict(state, strict=True)
                 vc.eval()
-                logger.info("Violence model loaded from PyTorch (acc: %.1f%%)", ckpt.get("val_acc", 0))
-
+                logger.info(
+                    "Violence model loaded from PyTorch: %s (val acc: %.1f%%)",
+                    violence_pt_path,
+                    float(ckpt.get("val_acc", 0) or 0),
+                )
                 if ORT_AVAILABLE:
-                    logger.info("Exporting violence model to ONNX...")
-                    dummy = torch.randn(1, 3, 16, 64, 64)
-                    torch.onnx.export(vc, dummy, str(violence_onnx_path), opset_version=18,
-                                      input_names=["video_clip"], output_names=["prediction"],
-                                      dynamic_axes={"video_clip": {0: "batch"}}, dynamo=False)
-                    self.violence_onnx_session = _make_ort_session(violence_onnx_path)
-                    logger.info("Violence ONNX export complete: %s", violence_onnx_path)
+                    logger.info("Exporting violence model to ONNX (one-time)...")
+                    if not _export_violence_onnx(vc, violence_onnx_path):
+                        self.violence_pt_model = vc
                 else:
-                    # Keep PyTorch model as fallback
-                    self.pose_model = vc
+                    self.violence_pt_model = vc
             except Exception as e:
                 logger.error("Failed to load violence model: %s", e)
-        else:
-            logger.warning("Violence model not found at %s — violence detection disabled", violence_pt_path)
+        elif self.violence_onnx_session is None:
+            logger.warning(
+                "Violence model not found at %s (or ONNX at %s) — violence Conv3D disabled",
+                violence_pt_path,
+                violence_onnx_path,
+            )
 
         # Also try MediaPipe as supplementary (optional)
         try:
@@ -965,7 +1007,8 @@ class DetectionService:
         # crowd runs, so videos looked like they had no crowd at all.
         need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
         similar = self.is_frame_similar(frame)
-        if similar and not need_yolo and "crowd_density" not in enabled_modules:
+        # Violence Conv3D needs temporal context; skipping similar frames would starve the clip.
+        if similar and not need_yolo and "crowd_density" not in enabled_modules and "violence" not in enabled_modules:
             return []
 
         weapon_min = enabled_modules.get("weapon", {}).get("min_confidence")
@@ -1119,16 +1162,20 @@ class DetectionService:
         Falls back to optical flow if Conv3D model not available.
         """
         # ── Primary: Conv3D trained model ──
-        if self.violence_onnx_session is not None or (
-            self.pose_model is not None and hasattr(self.pose_model, 'features')
-        ):
-            # Build a clip of 16 frames from previous_frames + current frame
-            clip_frames = list(previous_frames[-15:]) + [frame]  # up to 16 frames
-
-            # Pad with duplicates if we don't have 16 frames yet
-            while len(clip_frames) < 16:
-                clip_frames.insert(0, clip_frames[0])
-            clip_frames = clip_frames[-16:]  # exactly 16
+        thr = float(getattr(settings, "VIOLENCE_DEFAULT_PROB_THRESHOLD", 0.5))
+        if self.violence_onnx_session is not None or self.violence_pt_model is not None:
+            n = ViolenceClassifier.NUM_FRAMES
+            # Chronological: all priors + current. At high analysis FPS, priors span a long buffer;
+            # subsample evenly (like training linspace) so clips are not 16 near-identical frames.
+            all_f = list(previous_frames) + [frame]
+            if len(all_f) < n:
+                clip_frames = list(all_f)
+                while len(clip_frames) < n:
+                    clip_frames.insert(0, clip_frames[0])
+                clip_frames = clip_frames[-n:]
+            else:
+                idx = np.linspace(0, len(all_f) - 1, n, dtype=int)
+                clip_frames = [all_f[int(i)] for i in idx]
 
             # Resize all to 64x64 and normalize
             processed = []
@@ -1142,22 +1189,27 @@ class DetectionService:
 
             try:
                 if self.violence_onnx_session is not None:
-                    outputs = self.violence_onnx_session.run(
-                        None, {"video_clip": clip}
-                    )
+                    in_name = self._violence_onnx_input_name or "video_clip"
+                    outputs = self.violence_onnx_session.run(None, {in_name: clip})
                     logits = outputs[0][0]  # [non_violent, violent]
                 else:
-                    # PyTorch fallback
-                    tensor = torch.from_numpy(clip)
+                    use_cuda = (
+                        torch.cuda.is_available()
+                        and getattr(settings, "TORCH_PREFER_GPU", True)
+                    )
+                    dev = torch.device("cuda" if use_cuda else "cpu")
+                    self.violence_pt_model.to(dev)
+                    tensor = torch.from_numpy(clip).to(dev)
+                    self.violence_pt_model.eval()
                     with torch.no_grad():
-                        logits = self.pose_model(tensor)[0].numpy()
+                        logits = self.violence_pt_model(tensor)[0].cpu().numpy()
 
                 # Softmax to get probabilities
                 exp_logits = np.exp(logits - np.max(logits))
                 probs = exp_logits / exp_logits.sum()
                 violence_prob = float(probs[1])  # index 1 = violent
 
-                is_violent = violence_prob >= 0.6
+                is_violent = violence_prob >= thr
                 return {
                     "is_violent": is_violent,
                     "confidence": round(violence_prob, 4),

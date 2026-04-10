@@ -65,6 +65,18 @@ class Settings(BaseSettings):
     # value = min(1, count / CROWD_THREAT_MAX_PEOPLE_SCALE) for threshold compare (e.g. 0.7 high ≈ 70 people if scale=100)
     CROWD_THREAT_MAX_PEOPLE_SCALE: float = 100.0
     POSE_MODEL_PATH: str = "./models/pose_estimation.pb"       # MediaPipe (optional)
+    # Conv3D violence (v2): PyTorch checkpoint; ONNX is same basename + .onnx (auto-export on startup)
+    VIOLENCE_MODEL_PT_PATH: str = "./models/violence_model_v2.pt"
+    # If empty, derived from VIOLENCE_MODEL_PT_PATH (e.g. violence_model_v2.onnx)
+    VIOLENCE_MODEL_ONNX_PATH: Optional[str] = None
+    # Min P(violence) to emit a violence detection (softmax index 1)
+    VIOLENCE_DEFAULT_PROB_THRESHOLD: float = 0.5
+    # Seconds of *analyzed* frames to keep for violence; at high process_fps we subsample 16 frames
+    # across this window (avoids 16 near-duplicate frames when analyzing every video frame).
+    VIOLENCE_TEMPORAL_WINDOW_SECONDS: float = 2.0
+    VIOLENCE_HISTORY_MAX_FRAMES: int = 120
+    # Device for violence: ONNX path uses ONNX_PREFER_GPU (same ORT session logic as crowd).
+    # If ORT is unavailable and the .pt fallback runs, uses TORCH_PREFER_GPU + CUDA availability.
     CONFIDENCE_THRESHOLD: float = 0.5
     ABANDONED_OBJECT_THRESHOLD_SECONDS: int = 60
     # Weapon YOLO max inference side when using PyTorch weights (no ONNX fixed-input cap)
@@ -73,7 +85,7 @@ class Settings(BaseSettings):
     WEAPON_VIDEO_AI_MAX_SIDE: int = 640
     # Fixed export size for ONNX (must match exported graph)
     ONNX_YOLO_IMGSZ: int = 640
-    # ONNX Runtime: use CUDA when ``onnxruntime-gpu`` is installed and a GPU is visible
+    # ONNX Runtime: CUDA when ``onnxruntime-gpu`` + GPU visible (crowd + violence ONNX; CPU fallback on failure)
     ONNX_PREFER_GPU: bool = True
     # Ultralytics ``.pt`` / PyTorch weights: move to CUDA when available
     TORCH_PREFER_GPU: bool = True

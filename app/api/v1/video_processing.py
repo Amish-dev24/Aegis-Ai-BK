@@ -34,6 +34,7 @@ from app.models.alert import Alert, AlertStatus
 from app.models.evidence import Evidence
 from app.models.audit_log import create_audit_log
 from app.services.detection_service import detection_service
+from app.services.violence_model import ViolenceClassifier
 from app.services.video_service import video_service
 from app.services.email_service import email_service
 from app.services.sms_service import send_alert_sms
@@ -42,6 +43,19 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Minimum prior analyzed frames so Conv3D can form a clip (current frame is added in service).
+_VIOLENCE_PRIOR_FRAMES = max(0, ViolenceClassifier.NUM_FRAMES - 1)
+
+
+def _violence_rolling_buffer_size(process_fps: float, violence_enabled: bool) -> int:
+    """How many prior analyzed full frames to keep (higher at high FPS → subsample to 16 in detect_violence)."""
+    if not violence_enabled:
+        return 5
+    win = float(getattr(settings, "VIOLENCE_TEMPORAL_WINDOW_SECONDS", 2.0))
+    cap = int(getattr(settings, "VIOLENCE_HISTORY_MAX_FRAMES", 120))
+    target = int(max(1.0, process_fps) * win + 0.999)
+    return max(_VIOLENCE_PRIOR_FRAMES, min(cap, target))
 
 
 def _crowd_heatmap_frame_weight() -> float:
@@ -231,16 +245,20 @@ def _run_analysis(
     object_history, enabled_modules, needs_resize,
     ai_width, ai_height, last_detection_time, dedup_interval,
     camera_id, company_id, job, db, pending_db_count,
+    violence_history_tail: int = 3,
 ) -> tuple:
     """Run detection on one frame, persist results. Returns (active_detections, heatmap_overlay)."""
     active_detections = []
     heatmap_overlay = None
 
-    ai_prev = []
-    if "violence" in enabled_modules and previous_frames:
+    n_prev = violence_history_tail
+    ai_prev: list = []
+    if previous_frames:
+        tail = previous_frames[-n_prev:]
         ai_prev = (
-            [cv2.resize(f, (ai_width, ai_height)) for f in previous_frames[-3:]]
-            if needs_resize else previous_frames[-3:]
+            [cv2.resize(f, (ai_width, ai_height)) for f in tail]
+            if needs_resize
+            else list(tail)
         )
 
     all_raw = detection_service.detect_all_parallel(
@@ -465,6 +483,13 @@ def _process_video_sync(job_id: str):
         company_id = job["company_id"]
 
         enabled_modules = detection_service.get_enabled_modules(db, company_id)
+        process_fps = float(job.get("process_fps") or 1)
+        prev_buf_max = _violence_rolling_buffer_size(
+            process_fps, "violence" in enabled_modules
+        )
+        violence_tail_for_analysis = (
+            prev_buf_max if "violence" in enabled_modules else 3
+        )
         # Only when tuning crowd (avoids noise when company has crowd disabled)
         if getattr(settings, "CROWD_DEBUG_LOG", False) and "crowd_density" in enabled_modules:
             logger.info(
@@ -518,9 +543,10 @@ def _process_video_sync(job_id: str):
                             object_history, enabled_modules, needs_resize,
                             ai_width, ai_height, last_detection_time, dedup_interval,
                             camera_id, company_id, job, db, pending_db_count,
+                            violence_history_tail=violence_tail_for_analysis,
                         )
                         previous_frames.append(frame)
-                        if len(previous_frames) > 5:
+                        if len(previous_frames) > prev_buf_max:
                             previous_frames.pop(0)
                         pending_db_count = job.get("_pdb", 0)
 
@@ -578,9 +604,10 @@ def _process_video_sync(job_id: str):
                         object_history, enabled_modules, needs_resize,
                         ai_width, ai_height, last_detection_time, dedup_interval,
                         camera_id, company_id, job, db, pending_db_count,
+                        violence_history_tail=violence_tail_for_analysis,
                     )
                     previous_frames.append(frame)
-                    if len(previous_frames) > 5:
+                    if len(previous_frames) > prev_buf_max:
                         previous_frames.pop(0)
                     pending_db_count = job.get("_pdb", 0)
 
