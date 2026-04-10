@@ -281,8 +281,8 @@ def _run_analysis(
         # Cached crowd results are only for visualization speed; skip DB/evidence/alerts.
         if is_cached_crowd:
             if det_type == DetectionType.CROWD_DENSITY and getattr(settings, "CROWD_DEBUG_LOG", False):
-                logger.warning(
-                    "[crowd debug] frame=%s count=%s density=%.6f cached=%s persisted=%s",
+                logger.info(
+                    "\n[crowd debug] frame=%s count=%s density=%.6f cached=%s persisted=%s",
                     job.get("current_frame", -1),
                     det.get("count"),
                     float(det.get("density") or 0.0),
@@ -324,8 +324,8 @@ def _run_analysis(
         db.flush()
 
         if det_type == DetectionType.CROWD_DENSITY and getattr(settings, "CROWD_DEBUG_LOG", False):
-            logger.warning(
-                "[crowd debug] frame=%s count=%s density=%.6f cached=%s persisted=%s",
+            logger.info(
+                "\n[crowd debug] frame=%s count=%s density=%.6f cached=%s persisted=%s",
                 job.get("current_frame", -1),
                 det.get("count"),
                 float(det.get("density") or 0.0),
@@ -465,12 +465,12 @@ def _process_video_sync(job_id: str):
         company_id = job["company_id"]
 
         enabled_modules = detection_service.get_enabled_modules(db, company_id)
-        if getattr(settings, "CROWD_DEBUG_LOG", False):
-            logger.warning(
-                "[crowd debug] job=%s company=%s crowd_enabled=%s modules=%s",
+        # Only when tuning crowd (avoids noise when company has crowd disabled)
+        if getattr(settings, "CROWD_DEBUG_LOG", False) and "crowd_density" in enabled_modules:
+            logger.info(
+                "\n[crowd debug] job=%s company=%s modules=%s",
                 job_id,
                 company_id,
-                "crowd_density" in enabled_modules,
                 sorted(enabled_modules.keys()),
             )
 

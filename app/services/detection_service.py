@@ -205,6 +205,113 @@ def _try_move_yolo_to_cuda(model: Any, model_name: str) -> None:
         logger.warning("%s: could not use CUDA (%s), using CPU", model_name, e)
 
 
+def _log_inference_device_summary() -> None:
+    """One-time terminal summary: ONNX Runtime and PyTorch GPU vs CPU."""
+    parts: List[str] = []
+
+    if ORT_AVAILABLE and ort is not None:
+        try:
+            available = list(ort.get_available_providers())
+        except Exception:
+            available = ["(unknown)"]
+        chosen = _resolve_ort_providers()
+        if chosen and chosen[0] == "CUDAExecutionProvider":
+            parts.append("ONNX Runtime=new sessions use GPU (CUDAExecutionProvider) with CPU fallback")
+        elif not bool(getattr(settings, "ONNX_PREFER_GPU", True)):
+            parts.append("ONNX Runtime=CPU only (ONNX_PREFER_GPU=false)")
+        else:
+            parts.append(
+                "ONNX Runtime=CPU only (install onnxruntime-gpu + NVIDIA driver for CUDA)"
+            )
+        parts.append("ONNX available providers=%s" % available)
+    else:
+        parts.append("ONNX Runtime=not loaded")
+
+    if torch.cuda.is_available():
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:
+            name = "device 0"
+        parts.append("PyTorch CUDA=available (%s)" % name)
+    else:
+        parts.append("PyTorch CUDA=not available (Ultralytics .pt runs on CPU)")
+
+    if bool(getattr(settings, "TORCH_PREFER_GPU", True)):
+        parts.append("TORCH_PREFER_GPU=true")
+    else:
+        parts.append("TORCH_PREFER_GPU=false (skip moving .pt models to CUDA)")
+
+    logger.info("=== Inference devices: %s ===", " | ".join(parts))
+
+
+def _session_primary_provider(sess) -> Optional[str]:
+    if sess is None:
+        return None
+    try:
+        return sess.get_providers()[0]
+    except Exception:
+        return None
+
+
+def _log_aegis_device_banner(crowd_sess, violence_sess) -> None:
+    """
+    High-visibility terminal lines so operators immediately see GPU vs CPU
+    for our ONNX sessions (crowd / violence). WARNING level so it shows under default uvicorn logging.
+    """
+    c_prov = _session_primary_provider(crowd_sess)
+    v_prov = _session_primary_provider(violence_sess)
+    onnx_cuda = (c_prov == "CUDAExecutionProvider" or v_prov == "CUDAExecutionProvider")
+
+    lines = [
+        "========== Aegis AI — inference device (this process) ==========",
+    ]
+    if c_prov or v_prov:
+        lines.append(
+            "  ONNX sessions we load (crowd / violence): "
+            + ", ".join(
+                f"{name}={prov}"
+                for name, prov in (
+                    ("crowd", c_prov),
+                    ("violence", v_prov),
+                )
+                if prov is not None
+            )
+        )
+    else:
+        lines.append("  ONNX sessions (crowd / violence): none loaded")
+
+    if onnx_cuda:
+        lines.append("  >>> ONNX: USING GPU (CUDAExecutionProvider) <<<")
+    else:
+        lines.append(
+            "  >>> ONNX: USING CPU <<<  (pip install onnxruntime-gpu + CUDA for GPU)"
+        )
+
+    if torch.cuda.is_available():
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+        except Exception:
+            gpu_name = "device 0"
+        if getattr(settings, "TORCH_PREFER_GPU", True):
+            lines.append(
+                f"  >>> PyTorch: CUDA available — .pt YOLO can use GPU ({gpu_name}) <<<"
+            )
+        else:
+            lines.append(
+                f"  PyTorch: CUDA present but TORCH_PREFER_GPU=false — .pt YOLO stays on CPU"
+            )
+    else:
+        lines.append("  PyTorch: no CUDA — .pt YOLO runs on CPU")
+
+    lines.append(
+        "  Note: Ultralytics YOLO .onnx uses its own ORT session; first predict may log its provider."
+    )
+    lines.append("================================================================")
+
+    for ln in lines:
+        logger.warning("%s", ln)
+
+
 # ---------------------------------------------------------------------------
 # SANet (ShanghaiTech-style density) — matches sanet_partB_best checkpoints
 # ---------------------------------------------------------------------------
@@ -312,7 +419,6 @@ class DetectionService:
         self._crowd_skip_counter = 0
         self._last_crowd_result: Optional[Dict[str, Any]] = None
         self._crowd_future = None  # async crowd task (non-blocking collection in detect_all_parallel)
-        self._crowd_disabled_warned = False  # avoid spamming when module is disabled by settings
         self.pose_model = None         # MediaPipe Pose
         self.mp_pose = None
         self.violence_onnx_session = None  # Conv3D violence classifier (ONNX)
@@ -343,6 +449,9 @@ class DetectionService:
         except ImportError:
             logger.warning("ultralytics not installed — %s detection disabled", model_name)
             return None, None
+
+        # Reduce "Loading models... / CPUExecutionProvider" noise on first inference
+        logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
         fixed_cap = int(getattr(settings, "ONNX_YOLO_IMGSZ", 640))
         onnx_path = pt_path.with_suffix(".onnx")
@@ -607,6 +716,7 @@ class DetectionService:
         try:
             from ultralytics import YOLO
 
+            logging.getLogger("ultralytics").setLevel(logging.WARNING)
             self._crowd_calibration_yolo = YOLO(load_target)
             _try_move_yolo_to_cuda(self._crowd_calibration_yolo, "Crowd calibration YOLO")
             logger.info("Crowd calibration YOLO ready: %s", load_target)
@@ -702,6 +812,19 @@ class DetectionService:
         self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
             history=500, varThreshold=50, detectShadows=True
         )
+
+        _log_inference_device_summary()
+        if self.crowd_onnx_session is not None:
+            logger.info(
+                "Crowd density ONNX active provider: %s",
+                self.crowd_onnx_session.get_providers()[0],
+            )
+        if self.violence_onnx_session is not None:
+            logger.info(
+                "Violence ONNX active provider: %s",
+                self.violence_onnx_session.get_providers()[0],
+            )
+        _log_aegis_device_banner(self.crowd_onnx_session, self.violence_onnx_session)
 
     # ==================================================================
     # Frame similarity check — skip AI on nearly identical frames
@@ -879,7 +1002,6 @@ class DetectionService:
             )
 
         if "crowd_density" in enabled_modules:
-            self._crowd_disabled_warned = False
             prev_crowd_result = self._last_crowd_result
             # Pick up async result from the previous analyzed frame (if it finished).
             self._finalize_async_crowd_result(wait_for_first=False)
@@ -903,21 +1025,19 @@ class DetectionService:
             self._finalize_async_crowd_result(wait_for_first=True)
 
             # Reuse previous crowd result every frame (until next async result arrives).
+            # Do not surface crowd as a "detection" when estimated count is 0 (no DB/UI noise).
             if self._last_crowd_result is not None:
                 crowd_out = dict(self._last_crowd_result)
-                is_fresh_result = (
-                    prev_crowd_result is None or prev_crowd_result is not self._last_crowd_result
-                )
-                # Mark as cached only when we are reusing the exact previous value.
-                if not is_fresh_result:
-                    crowd_out["_crowd_cached"] = True
-                all_results.append((DetectionType.CROWD_DENSITY, crowd_out))
-        elif getattr(settings, "CROWD_DEBUG_LOG", False) and not self._crowd_disabled_warned:
-            logger.warning(
-                "[crowd debug] crowd_density is not enabled for this company/job. enabled_modules=%s",
-                sorted(enabled_modules.keys()),
-            )
-            self._crowd_disabled_warned = True
+                if int(crowd_out.get("count", 0) or 0) < 1:
+                    pass
+                else:
+                    is_fresh_result = (
+                        prev_crowd_result is None
+                        or prev_crowd_result is not self._last_crowd_result
+                    )
+                    if not is_fresh_result:
+                        crowd_out["_crowd_cached"] = True
+                    all_results.append((DetectionType.CROWD_DENSITY, crowd_out))
 
         if "violence" in enabled_modules:
             futures["violence"] = self._inference_pool.submit(
