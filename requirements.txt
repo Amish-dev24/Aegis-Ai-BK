@@ -21,7 +21,8 @@ jinja2==3.1.2
 redis==5.0.1
 celery==5.3.4
 # CPU (default). For GPU: pip uninstall onnxruntime && pip install onnxruntime-gpu  (match your CUDA version)
-onnxruntime>=1.17.0
+onnxruntime-gpu>=1.17.0
 onnx>=1.14.0
 ultralytics>=8.0.0
+twilio>=9.0.0
 
