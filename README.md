@@ -190,13 +190,13 @@ Body: { "name": "Front Gate Camera", "location": "Main Entrance", "zone": "Zone 
 
 **Option A — Upload a Video:**
 ```
-POST /api/v1/detections/process-video?camera_id=1
+POST /api/v1/video/process?camera_id=1&generate_video=true
 Headers: Authorization: Bearer <access_token>
 Body: form-data → video_file: <your_video.mp4>
 ```
 The backend will:
 1. Save the video to `uploads/`
-2. Extract frames using OpenCV (processes every 10th frame for performance)
+2. Extract frames using OpenCV (processes frames at the configured analysis rate)
 3. Run each frame through all AI models:
    - **Weapon detection** (YOLOv8) → Weapons, Bags, Boxes
    - **Face detection** (YOLOv8) → covered/uncovered faces
@@ -205,7 +205,10 @@ The backend will:
 4. Save each detection to the database with bounding box coordinates
 5. Save evidence snapshots to `evidence/`
 6. Auto-create alerts + send emails for HIGH/CRITICAL threats
-7. Delete the uploaded video after processing
+7. Generate a browser-playable processed MP4 when `generate_video=true`
+8. Delete the uploaded video after processing
+
+> On Linux / Debian deployments, install `ffmpeg` so the processed MP4 can be re-encoded for browser playback.
 
 **Option B — Upload a Single Image:**
 ```

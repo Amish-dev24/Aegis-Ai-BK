@@ -141,6 +141,18 @@ def _get_job(job_id: str) -> dict:
     return job
 
 
+def _job_response_urls(request: Request, job: dict) -> tuple[Optional[str], Optional[str]]:
+    """Return absolute URLs for job media when available."""
+    output_url = job.get("output_video_url")
+    heatmap_url = job.get("heatmap_video_url")
+    base_url = str(request.base_url).rstrip("/")
+    if output_url:
+        output_url = base_url + output_url
+    if heatmap_url:
+        heatmap_url = base_url + heatmap_url
+    return output_url, heatmap_url
+
+
 # ---------------------------------------------------------------------------
 # POST /video/process
 # ---------------------------------------------------------------------------
@@ -149,7 +161,7 @@ async def start_video_processing(
     request: Request,
     camera_id: int,
     video_file: UploadFile = File(...),
-    generate_video: bool = Query(False, description="Generate annotated output video (slower)"),
+    generate_video: bool = Query(True, description="Generate annotated output video (slower)"),
     process_fps: int = Query(1, ge=1, le=30, description="Frames per second to analyze (1=fast, 30=every frame)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_security_officer),
@@ -670,10 +682,13 @@ def _process_video_sync(job_id: str):
 @router.get("/jobs/{job_id}")
 async def get_job_status(
     job_id: str,
+    request: Request,
     current_user: User = Depends(require_any_authenticated),
 ):
     """Get processing job status, progress, and results."""
     job = _get_job(job_id)
+
+    output_video_url, heatmap_video_url = _job_response_urls(request, job)
 
     return {
         "job_id": job["job_id"],
@@ -685,8 +700,8 @@ async def get_job_status(
         "total_detections": job["total_detections"],
         "total_alerts": job["total_alerts"],
         "detections": job["detections"],
-        "output_video_url": job["output_video_url"],
-        "heatmap_video_url": job["heatmap_video_url"],
+        "output_video_url": output_video_url,
+        "heatmap_video_url": heatmap_video_url,
         "started_at": job["started_at"],
         "completed_at": job["completed_at"],
         "error": job["error"],
@@ -699,6 +714,7 @@ async def get_job_status(
 @router.get("/jobs/{job_id}/progress")
 async def stream_progress(
     job_id: str,
+    request: Request,
     current_user: User = Depends(require_any_authenticated),
 ):
     """Server-Sent Events stream for real-time progress."""
@@ -722,8 +738,9 @@ async def stream_progress(
 
             if job["status"] in ("completed", "failed"):
                 if job["status"] == "completed":
-                    payload["output_video_url"] = job["output_video_url"]
-                    payload["heatmap_video_url"] = job["heatmap_video_url"]
+                    output_video_url, heatmap_video_url = _job_response_urls(request, job)
+                    payload["output_video_url"] = output_video_url
+                    payload["heatmap_video_url"] = heatmap_video_url
                 else:
                     payload["error"] = job["error"]
                 yield f"data: {json.dumps(payload)}\n\n"
@@ -804,6 +821,7 @@ async def download_processed_video(
 # ---------------------------------------------------------------------------
 @router.get("/jobs")
 async def list_jobs(
+    request: Request,
     status_filter: Optional[str] = Query(None, alias="status"),
     current_user: User = Depends(require_any_authenticated),
 ):
@@ -819,6 +837,8 @@ async def list_jobs(
         if status_filter and job["status"] != status_filter:
             continue
 
+        output_video_url, heatmap_video_url = _job_response_urls(request, job)
+
         results.append({
             "job_id": job["job_id"],
             "status": job["status"],
@@ -830,8 +850,8 @@ async def list_jobs(
             "camera_id": job["camera_id"],
             "started_at": job["started_at"],
             "completed_at": job["completed_at"],
-            "output_video_url": job["output_video_url"],
-            "heatmap_video_url": job["heatmap_video_url"],
+            "output_video_url": output_video_url,
+            "heatmap_video_url": heatmap_video_url,
         })
 
     return results
