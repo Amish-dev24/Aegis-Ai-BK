@@ -44,6 +44,6 @@ class DetectionFilter(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     min_confidence: Optional[float] = None
-    limit: int = 100
-    offset: int = 0
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
 

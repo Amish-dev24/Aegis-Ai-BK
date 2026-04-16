@@ -4,7 +4,7 @@ Detection endpoints for managing AI detections.
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
 from app.database import get_db
 from app.core.security import require_any_authenticated, require_security_officer, get_current_user, get_user_company_filter, check_company_access
 from app.models.user import Role
@@ -18,6 +18,7 @@ from app.services.video_service import video_service
 from app.services.email_service import email_service
 from app.models.alert import Alert, AlertStatus
 from app.models.evidence import Evidence
+from app.models.detection_settings import GlobalModuleSettings, CompanyDetectionSettings
 from app.models.audit_log import create_audit_log
 import cv2
 import numpy as np
@@ -113,10 +114,11 @@ async def list_detections(
     current_user: User = Depends(require_any_authenticated)
 ):
     """List detections with filtering. Company users see only their company's detections."""
-    query = db.query(Detection)
-
-    # Filter by company (aegis_admin can override with company_id param)
     company_filter = get_user_company_filter(current_user, company_id)
+    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+        return []
+
+    query = db.query(Detection)
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
     
@@ -135,10 +137,20 @@ async def list_detections(
     
     detections = query.order_by(Detection.detected_at.desc()).offset(filter_params.offset).limit(filter_params.limit).all()
 
-    # Enrich with evidence_id for snapshot display
+    # Batch-load evidence in one query instead of one query per detection (N+1 fix)
+    det_ids = [d.id for d in detections]
+    evidence_map: dict[int, int] = {}
+    if det_ids:
+        evidence_map = {
+            e.detection_id: e.id
+            for e in db.query(Evidence.detection_id, Evidence.id)
+                        .filter(Evidence.detection_id.in_(det_ids))
+                        .all()
+        }
+
     result = []
     for det in detections:
-        det_dict = {
+        result.append({
             "id": det.id, "camera_id": det.camera_id, "company_id": det.company_id,
             "detection_type": det.detection_type.value if det.detection_type else None,
             "threat_level": det.threat_level.value if det.threat_level else None,
@@ -146,10 +158,8 @@ async def list_detections(
             "detected_at": det.detected_at, "bbox_x": det.bbox_x, "bbox_y": det.bbox_y,
             "bbox_width": det.bbox_width, "bbox_height": det.bbox_height,
             "detection_metadata": det.detection_metadata,
-        }
-        evidence = db.query(Evidence).filter(Evidence.detection_id == det.id).first()
-        det_dict["evidence_id"] = evidence.id if evidence else None
-        result.append(det_dict)
+            "evidence_id": evidence_map.get(det.id),
+        })
     return result
 
 
@@ -547,37 +557,113 @@ async def get_detection_stats(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
-    days: int = 7
+    days: int = 7,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis_admin only)"),
 ):
-    """Get detection statistics summary. Company users see only their company's stats."""
+    """Dashboard summary statistics.
+
+    Returns detection counts, evidence total, active cameras, critical threats,
+    and enabled AI module count — all in a single request so the dashboard
+    does not need to call multiple list endpoints and guess totals from page sizes.
+
+    company_id behaviour:
+    - AEGIS_ADMIN + no company_id  → aggregate across ALL companies
+    - AEGIS_ADMIN + company_id     → scoped to that company
+    - Company user                 → always scoped to their company
+    """
     from datetime import timedelta
+
+    company_filter = get_user_company_filter(current_user, company_id)
+    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+        empty = {t.value: 0 for t in DetectionType}
+        return {
+            "total_detections": 0, "by_type": empty,
+            "by_threat_level": {t.value: 0 for t in ThreatLevel},
+            "period_days": days, "critical_threats": 0,
+            "evidence_count": 0, "active_cameras": 0, "ai_modules": 0,
+        }
+
     start_date = datetime.utcnow() - timedelta(days=days)
-    
-    # Filter by company (unless Aegis AI admin)
-    company_filter = get_user_company_filter(current_user)
-    
-    base_query = db.query(Detection).filter(Detection.detected_at >= start_date)
+
+    # --- Detection counts (2 GROUP BY queries) ---
+    det_base = db.query(Detection).filter(Detection.detected_at >= start_date)
     if company_filter is not None:
-        base_query = base_query.filter(Detection.company_id == company_filter)
-    
-    total = base_query.count()
-    by_type = {}
-    by_threat = {}
-    
-    for det_type in DetectionType:
-        query = base_query.filter(Detection.detection_type == det_type)
-        count = query.count()
-        by_type[det_type.value] = count
-    
-    for threat in ThreatLevel:
-        query = base_query.filter(Detection.threat_level == threat)
-        count = query.count()
-        by_threat[threat.value] = count
-    
+        det_base = det_base.filter(Detection.company_id == company_filter)
+
+    by_type = {t.value: 0 for t in DetectionType}
+    for det_type_val, count in (
+        det_base.with_entities(Detection.detection_type, func.count(Detection.id))
+                .group_by(Detection.detection_type).all()
+    ):
+        by_type[det_type_val.value] = count
+
+    by_threat = {t.value: 0 for t in ThreatLevel}
+    for threat_val, count in (
+        det_base.with_entities(Detection.threat_level, func.count(Detection.id))
+                .group_by(Detection.threat_level).all()
+    ):
+        by_threat[threat_val.value] = count
+
+    total_detections = sum(by_type.values())
+    critical_threats = by_threat.get(ThreatLevel.CRITICAL.value, 0)
+
+    # --- Evidence total count (real total, not page size) ---
+    ev_query = db.query(func.count(Evidence.id)).join(
+        Detection, Evidence.detection_id == Detection.id
+    )
+    if company_filter is not None:
+        ev_query = ev_query.filter(Detection.company_id == company_filter)
+    evidence_count = ev_query.scalar() or 0
+
+    # --- Active cameras count ---
+    cam_query = db.query(func.count(Camera.id)).filter(Camera.is_active == True)
+    if company_filter is not None:
+        cam_query = cam_query.filter(Camera.company_id == company_filter)
+    active_cameras = cam_query.scalar() or 0
+
+    # --- AI modules count ---
+    # When viewing a specific company: count modules enabled for that company
+    # (company override takes precedence; fall back to global setting).
+    # When viewing all companies (AEGIS_ADMIN, no company_id): count globally enabled modules.
+    if company_filter is not None:
+        # Modules explicitly enabled at company level
+        company_enabled = db.query(func.count(CompanyDetectionSettings.id)).filter(
+            CompanyDetectionSettings.company_id == company_filter,
+            CompanyDetectionSettings.is_enabled == True,
+        ).scalar() or 0
+
+        # Globally enabled modules that the company has NOT overridden
+        overridden_modules = [
+            r.module_name for r in db.query(CompanyDetectionSettings.module_name).filter(
+                CompanyDetectionSettings.company_id == company_filter
+            ).all()
+        ]
+        global_fallback_q = db.query(func.count(GlobalModuleSettings.id)).filter(
+            GlobalModuleSettings.is_enabled == True
+        )
+        if overridden_modules:
+            global_fallback_q = global_fallback_q.filter(
+                GlobalModuleSettings.module_name.notin_(overridden_modules)
+            )
+        global_fallback = global_fallback_q.scalar() or 0
+        ai_modules = company_enabled + global_fallback
+    else:
+        # All-companies view: count globally enabled modules
+        ai_modules = db.query(func.count(GlobalModuleSettings.id)).filter(
+            GlobalModuleSettings.is_enabled == True
+        ).scalar() or 0
+        # If no global settings exist yet, fall back to total DetectionType count
+        if ai_modules == 0 and db.query(func.count(GlobalModuleSettings.id)).scalar() == 0:
+            ai_modules = len(DetectionType)
+
     return {
-        "total_detections": total,
+        "total_detections": total_detections,
         "by_type": by_type,
         "by_threat_level": by_threat,
-        "period_days": days
+        "period_days": days,
+        "critical_threats": critical_threats,
+        "evidence_count": evidence_count,
+        "active_cameras": active_cameras,
+        "ai_modules": ai_modules,
     }
 

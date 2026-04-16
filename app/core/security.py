@@ -122,6 +122,22 @@ def get_user_company_filter(user: User, company_id_override: int = None):
     return user.company_id
 
 
+def get_company_filter_required(user: User, company_id_override: Optional[int] = None) -> Optional[int]:
+    """Get the company ID to scope a query to, enforcing strict per-company isolation.
+
+    Returns:
+    - An integer company ID when a specific company is known.
+    - None when AEGIS_ADMIN has not selected a company yet — callers must return
+      empty results in that case so no cross-company data leaks.
+
+    Unlike get_user_company_filter (which returns None to mean "no filter / all companies"),
+    a None return here always means "no data to show".
+    """
+    if user.role == Role.AEGIS_ADMIN:
+        return company_id_override  # None → caller will return empty results
+    return user.company_id  # None for unassigned users → caller will return empty results
+
+
 # Common role dependencies
 require_aegis_admin = require_role([Role.AEGIS_ADMIN])
 require_admin = require_role([Role.AEGIS_ADMIN, Role.ADMIN])  # Both Aegis AI admin and company admin

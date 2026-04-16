@@ -2,7 +2,7 @@
 Company management endpoints for Aegis AI admins.
 """
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
@@ -28,13 +28,15 @@ router = APIRouter(prefix="/companies", tags=["companies"])
 async def list_companies(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_aegis_admin),
-    verified_only: bool = False
+    verified_only: bool = False,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ):
     """List all companies (Aegis AI admin only)."""
     query = db.query(Company)
     if verified_only:
         query = query.filter(Company.is_verified == True)
-    companies = query.all()
+    companies = query.order_by(Company.id).offset(offset).limit(limit).all()
     return companies
 
 
@@ -43,63 +45,88 @@ async def get_companies_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_aegis_admin)
 ):
-    """Get statistics for all companies (Aegis AI admin only)."""
-    companies = db.query(Company).all()
+    """Get statistics for all companies (Aegis AI admin only).
+
+    Uses 5 single GROUP BY queries instead of 7 queries per company (N+1 fix).
+    """
+    companies = db.query(Company.id, Company.name).all()
+    company_ids = [c.id for c in companies]
+
+    if not company_ids:
+        return []
+
+    # --- aggregate all companies in one pass each ---
+    user_totals = {
+        row.company_id: row.total
+        for row in db.query(User.company_id, func.count(User.id).label("total"))
+                      .filter(User.company_id.in_(company_ids))
+                      .group_by(User.company_id).all()
+    }
+    user_active = {
+        row.company_id: row.total
+        for row in db.query(User.company_id, func.count(User.id).label("total"))
+                      .filter(User.company_id.in_(company_ids), User.is_active == True)
+                      .group_by(User.company_id).all()
+    }
+    camera_totals = {
+        row.company_id: row.total
+        for row in db.query(Camera.company_id, func.count(Camera.id).label("total"))
+                      .filter(Camera.company_id.in_(company_ids))
+                      .group_by(Camera.company_id).all()
+    }
+    camera_active = {
+        row.company_id: row.total
+        for row in db.query(Camera.company_id, func.count(Camera.id).label("total"))
+                      .filter(Camera.company_id.in_(company_ids), Camera.is_active == True)
+                      .group_by(Camera.company_id).all()
+    }
+    detection_totals = {
+        row.company_id: row.total
+        for row in db.query(Detection.company_id, func.count(Detection.id).label("total"))
+                      .filter(Detection.company_id.in_(company_ids))
+                      .group_by(Detection.company_id).all()
+    }
+    alert_totals = {
+        row.company_id: row.total
+        for row in db.query(Alert.company_id, func.count(Alert.id).label("total"))
+                      .filter(Alert.company_id.in_(company_ids))
+                      .group_by(Alert.company_id).all()
+    }
+    last_logins = {
+        row.company_id: row.last_login
+        for row in db.query(User.company_id, func.max(User.last_login).label("last_login"))
+                      .filter(User.company_id.in_(company_ids))
+                      .group_by(User.company_id).all()
+    }
+    last_detections = {
+        row.company_id: row.last_det
+        for row in db.query(Detection.company_id, func.max(Detection.detected_at).label("last_det"))
+                      .filter(Detection.company_id.in_(company_ids))
+                      .group_by(Detection.company_id).all()
+    }
+
     stats = []
-    
     for company in companies:
-        # Count users
-        total_users = db.query(func.count(User.id)).filter(User.company_id == company.id).scalar()
-        active_users = db.query(func.count(User.id)).filter(
-            User.company_id == company.id,
-            User.is_active == True
-        ).scalar()
-        
-        # Count cameras
-        total_cameras = db.query(func.count(Camera.id)).filter(Camera.company_id == company.id).scalar()
-        active_cameras = db.query(func.count(Camera.id)).filter(
-            Camera.company_id == company.id,
-            Camera.is_active == True
-        ).scalar()
-        
-        # Count detections
-        total_detections = db.query(func.count(Detection.id)).filter(
-            Detection.company_id == company.id
-        ).scalar()
-        
-        # Count alerts
-        total_alerts = db.query(func.count(Alert.id)).filter(
-            Alert.company_id == company.id
-        ).scalar()
-        
-        # Get last activity (most recent user login or detection)
-        last_user_login = db.query(func.max(User.last_login)).filter(
-            User.company_id == company.id
-        ).scalar()
-        last_detection = db.query(func.max(Detection.detected_at)).filter(
-            Detection.company_id == company.id
-        ).scalar()
-        
-        last_activity = None
-        if last_user_login and last_detection:
-            last_activity = max(last_user_login, last_detection)
-        elif last_user_login:
-            last_activity = last_user_login
-        elif last_detection:
-            last_activity = last_detection
-        
+        cid = company.id
+        last_login = last_logins.get(cid)
+        last_det = last_detections.get(cid)
+        if last_login and last_det:
+            last_activity = max(last_login, last_det)
+        else:
+            last_activity = last_login or last_det
+
         stats.append(CompanyStats(
-            company_id=company.id,
+            company_id=cid,
             company_name=company.name,
-            total_users=total_users or 0,
-            active_users=active_users or 0,
-            total_cameras=total_cameras or 0,
-            active_cameras=active_cameras or 0,
-            total_detections=total_detections or 0,
-            total_alerts=total_alerts or 0,
-            last_activity=last_activity
+            total_users=user_totals.get(cid, 0),
+            active_users=user_active.get(cid, 0),
+            total_cameras=camera_totals.get(cid, 0),
+            active_cameras=camera_active.get(cid, 0),
+            total_detections=detection_totals.get(cid, 0),
+            total_alerts=alert_totals.get(cid, 0),
+            last_activity=last_activity,
         ))
-    
+
     return stats
 
 

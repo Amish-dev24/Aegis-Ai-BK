@@ -16,8 +16,8 @@ class Camera(Base):
     location = Column(String(200))
     description = Column(Text)
     stream_url = Column(String(500))  # RTSP, HTTP, or file path
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    is_active = Column(Boolean, default=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    is_active = Column(Boolean, default=True, index=True)
     zone = Column(String(100))  # Zone identifier for grouping
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)

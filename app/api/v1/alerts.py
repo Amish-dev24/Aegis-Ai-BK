@@ -15,7 +15,7 @@ from app.models.alert_log import AlertLog
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.camera import Camera
 from app.models.evidence import Evidence
-from app.models.user import User
+from app.models.user import User, Role
 from app.services.email_service import email_service
 from app.models.audit_log import create_audit_log
 from datetime import datetime
@@ -25,21 +25,28 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
 def _build_log_responses(alert: Alert, db: Session) -> list:
-    """Build log responses with usernames."""
+    """Build log responses with usernames (single batched query — no N+1)."""
     logs = db.query(AlertLog).filter(AlertLog.alert_id == alert.id).order_by(AlertLog.created_at).all()
-    result = []
-    for log in logs:
-        user = db.query(User).filter(User.id == log.user_id).first()
-        result.append(AlertLogResponse(
+    if not logs:
+        return []
+    # Batch-load all referenced users in one query
+    user_ids = list({log.user_id for log in logs})
+    username_map: dict[int, str] = {
+        u.id: u.username
+        for u in db.query(User.id, User.username).filter(User.id.in_(user_ids)).all()
+    }
+    return [
+        AlertLogResponse(
             id=log.id,
             alert_id=log.alert_id,
             user_id=log.user_id,
-            username=user.username if user else None,
+            username=username_map.get(log.user_id),
             action=log.action,
             message=log.message,
             created_at=log.created_at,
-        ))
-    return result
+        )
+        for log in logs
+    ]
 
 
 def _enrich_alert(alert: Alert, detection: Detection = None, camera: Camera = None, evidence: Evidence = None, logs: list = None) -> AlertDetailResponse:
@@ -157,13 +164,14 @@ async def list_alerts(
 ):
     """List alerts with filters. Includes detection context, camera info, and evidence image."""
     company_filter = get_user_company_filter(current_user, company_id)
+    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+        return []
 
     query = db.query(Alert, Detection, Camera).join(
         Detection, Alert.detection_id == Detection.id
     ).join(
         Camera, Detection.camera_id == Camera.id
     )
-
     if company_filter is not None:
         query = query.filter(Alert.company_id == company_filter)
 

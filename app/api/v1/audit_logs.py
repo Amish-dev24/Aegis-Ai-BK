@@ -20,26 +20,29 @@ async def get_audit_logs(
     user_id: Optional[int] = None,
     action: Optional[str] = None,
     resource_type: Optional[str] = None,
+    company_id: Optional[int] = Query(None, description="Filter by company (aegis_admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     Get audit logs.
-    - Aegis Admin: Can see all logs.
+    - Aegis Admin: Can see all logs, optionally filtered by company_id.
     - Company Admin/User: Can only see logs for users in their company.
     """
     query = db.query(AuditLog)
+    _user_joined = False
 
     # RBAC Filter
     if current_user.role != Role.AEGIS_ADMIN:
-        # Filter by company users
         if not current_user.company_id:
-             # If user has no company (and is not Aegis Admin), only see their own logs
-             query = query.filter(AuditLog.user_id == current_user.id)
+            query = query.filter(AuditLog.user_id == current_user.id)
         else:
-            # Join User table to filter by company_id
-            # This implicitly filters out logs with NULL user_id, which is correct for tenant isolation
-            query = query.join(User).filter(User.company_id == current_user.company_id)
+            query = query.join(User, AuditLog.user_id == User.id).filter(User.company_id == current_user.company_id)
+            _user_joined = True
+    elif company_id:
+        # Aegis admin filtering by a specific company
+        query = query.join(User, AuditLog.user_id == User.id).filter(User.company_id == company_id)
+        _user_joined = True
 
     # Apply filters
     if user_id:
@@ -48,8 +51,7 @@ async def get_audit_logs(
         query = query.filter(AuditLog.action.ilike(f"%{action}%"))
     if resource_type:
         query = query.filter(AuditLog.resource_type == resource_type)
-    
-    # Ordering
+
     query = query.order_by(AuditLog.created_at.desc())
 
     return query.offset(skip).limit(limit).all()

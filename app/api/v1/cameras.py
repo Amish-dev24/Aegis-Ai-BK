@@ -55,7 +55,9 @@ async def list_cameras(
     company_id: Optional[int] = Query(None, description="Filter by company"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    active_only: bool = False
+    active_only: bool = Query(default=False, description="Return only active cameras"),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ):
     """List cameras. Company users see only their company's cameras."""
     query = db.query(Camera)
@@ -63,11 +65,11 @@ async def list_cameras(
     company_filter = get_user_company_filter(current_user, company_id)
     if company_filter is not None:
         query = query.filter(Camera.company_id == company_filter)
-    
+
     if active_only:
         query = query.filter(Camera.is_active == True)
-    
-    cameras = query.all()
+
+    cameras = query.order_by(Camera.id).offset(offset).limit(limit).all()
     return cameras
 
 
