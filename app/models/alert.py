@@ -1,7 +1,7 @@
 """
 Alert model for managing security alerts.
 """
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Text, Enum
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Text, Enum, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -20,7 +20,13 @@ class AlertStatus(str, enum.Enum):
 class Alert(Base):
     """Alert model for security notifications."""
     __tablename__ = "alerts"
-    
+
+    __table_args__ = (
+        Index("ix_alerts_company_created_at", "company_id", "created_at"),
+        Index("ix_alerts_detection_id", "detection_id"),
+        Index("ix_alerts_status", "status"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
     detection_id = Column(Integer, ForeignKey("detections.id"), nullable=False)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)

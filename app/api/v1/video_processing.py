@@ -12,6 +12,7 @@ Optimizations:
 import asyncio
 import uuid
 import os
+import json
 import logging
 import threading
 from typing import Optional
@@ -27,7 +28,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db, SessionLocal
 from app.config import settings
 from app.core.security import require_security_officer, require_any_authenticated, check_company_access, get_user_company_filter
-from app.models.user import User
+from app.models.user import User, Role
 from app.models.camera import Camera
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.alert import Alert, AlertStatus
@@ -68,6 +69,77 @@ router = APIRouter(prefix="/video", tags=["video-processing"])
 
 _thread_pool = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
+
+
+def _check_job_access(job: dict, current_user: User) -> None:
+    """Raise 403 if the user is not allowed to access this job.
+
+    Access rules:
+    - AEGIS_ADMIN  : unrestricted
+    - ADMIN        : any job belonging to their own company
+    - All others   : only jobs they personally submitted (user_id match)
+    """
+    if current_user.role == Role.AEGIS_ADMIN:
+        return
+    if current_user.role == Role.ADMIN:
+        if job.get("company_id") == current_user.company_id:
+            return
+    elif job.get("user_id") == current_user.id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Not enough permissions to access this job",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Job persistence — survive server restarts
+# ---------------------------------------------------------------------------
+_JOB_META_SUFFIX = "_meta.json"
+# Fields that are runtime-only and should not be persisted to disk
+_JOB_TRANSIENT_FIELDS = {"upload_path", "_pdb"}
+
+
+def _job_meta_path(job_id: str) -> Path:
+    return Path(settings.PROCESSED_VIDEO_DIR) / f"{job_id}{_JOB_META_SUFFIX}"
+
+
+def _save_job_to_disk(job: dict) -> None:
+    """Persist completed/failed job state to a JSON sidecar file."""
+    try:
+        payload = {k: v for k, v in job.items() if k not in _JOB_TRANSIENT_FIELDS}
+        _job_meta_path(job["job_id"]).write_text(
+            json.dumps(payload, default=str), encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.warning("Could not save job %s to disk: %s", job.get("job_id"), exc)
+
+
+def load_jobs_from_disk() -> None:
+    """Reload completed/failed jobs from sidecar JSON files into _jobs.
+
+    Called once at server startup so results survive process restarts.
+    """
+    meta_dir = Path(settings.PROCESSED_VIDEO_DIR)
+    if not meta_dir.exists():
+        return
+    loaded = 0
+    for meta_file in meta_dir.glob(f"*{_JOB_META_SUFFIX}"):
+        try:
+            data = json.loads(meta_file.read_text(encoding="utf-8"))
+            job_id = data.get("job_id")
+            if job_id and job_id not in _jobs:
+                # Ensure required runtime keys exist with safe defaults
+                data.setdefault("detections", [])
+                data.setdefault("upload_path", "")
+                data.setdefault("_pdb", 0)
+                _jobs[job_id] = data
+                loaded += 1
+        except Exception as exc:
+            logger.warning("Could not load job metadata from %s: %s", meta_file, exc)
+    if loaded:
+        logger.info("Restored %d completed video job(s) from disk.", loaded)
+
 
 # ---------------------------------------------------------------------------
 # Background email sender — emails must never block the inference loop
@@ -661,12 +733,14 @@ def _process_video_sync(job_id: str):
         job["completed_at"] = datetime.utcnow().isoformat()
         logger.info("Job %s completed: %d detections, %d alerts",
                      job_id, job["total_detections"], job["total_alerts"])
+        _save_job_to_disk(job)
 
     except Exception as e:
         job["status"] = "failed"
         job["error"] = str(e)
         logger.exception("Job %s failed: %s", job_id, e)
         db.rollback()
+        _save_job_to_disk(job)
     finally:
         db.close()
         try:
@@ -687,6 +761,7 @@ async def get_job_status(
 ):
     """Get processing job status, progress, and results."""
     job = _get_job(job_id)
+    _check_job_access(job, current_user)
 
     output_video_url, heatmap_video_url = _job_response_urls(request, job)
 
@@ -718,7 +793,8 @@ async def stream_progress(
     current_user: User = Depends(require_any_authenticated),
 ):
     """Server-Sent Events stream for real-time progress."""
-    _get_job(job_id)
+    job_initial = _get_job(job_id)
+    _check_job_access(job_initial, current_user)
 
     async def event_generator():
         import json
@@ -770,6 +846,7 @@ async def get_processed_video(
 ):
     """Stream the processed video with bounding boxes for playback."""
     job = _get_job(job_id)
+    _check_job_access(job, current_user)
 
     if job["status"] != "completed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}")
@@ -798,6 +875,7 @@ async def download_processed_video(
 ):
     """Download the processed video."""
     job = _get_job(job_id)
+    _check_job_access(job, current_user)
 
     if job["status"] != "completed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}")
@@ -826,11 +904,17 @@ async def list_jobs(
     current_user: User = Depends(require_any_authenticated),
 ):
     """List all processing jobs for the current user."""
-    company_filter = get_user_company_filter(current_user)
-
     results = []
     for job in _jobs.values():
-        if company_filter is not None and job.get("company_id") != company_filter:
+        # AEGIS_ADMIN sees every job
+        if current_user.role == Role.AEGIS_ADMIN:
+            pass
+        # Company ADMIN sees all jobs belonging to their company
+        elif current_user.role == Role.ADMIN:
+            if job.get("company_id") != current_user.company_id:
+                continue
+        # All other roles (SECURITY_OFFICER, VIEWER) see only their own jobs
+        else:
             if job.get("user_id") != current_user.id:
                 continue
 

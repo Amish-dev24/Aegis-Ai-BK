@@ -28,8 +28,8 @@ class User(Base):
     phone_number = Column(String(20), nullable=True)
     alert_preference = Column(String(20), default="email", nullable=False)  # "email", "email_sms", "sms"
     role = Column(Enum(Role), default=Role.SECURITY_OFFICER, nullable=False)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)  # NULL for Aegis AI admins, set after admin verification
-    is_active = Column(Boolean, default=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)  # NULL for Aegis AI admins, set after admin verification
+    is_active = Column(Boolean, default=True, index=True)
     admin_verified = Column(Boolean, default=False)  # Verified by admin
     email_verified = Column(Boolean, default=False)  # Email verified
     phone_verified = Column(Boolean, default=False)  # Phone number verified

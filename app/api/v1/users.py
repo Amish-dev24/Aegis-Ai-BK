@@ -19,20 +19,20 @@ router = APIRouter(prefix="/users", tags=["users"])
 async def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
-    company_id: Optional[int] = Query(None, description="Filter by company ID (Aegis AI admin only)")
+    company_id: Optional[int] = Query(None, description="Filter by company ID (Aegis AI admin only)"),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ):
     """List users (admin only). Company admins see only their company's users."""
     query = db.query(User)
-    
-    # Aegis AI admins can filter by company or see all
+
     if current_user.role == Role.AEGIS_ADMIN:
         if company_id:
             query = query.filter(User.company_id == company_id)
     else:
-        # Company admins can only see their own company's users
         query = query.filter(User.company_id == current_user.company_id)
-    
-    users = query.all()
+
+    users = query.order_by(User.id).offset(offset).limit(limit).all()
     return users
 
 

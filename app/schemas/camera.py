@@ -37,7 +37,7 @@ class CameraUpdate(BaseModel):
 class CameraResponse(CameraBase):
     """Schema for camera response."""
     id: int
-    company_id: int
+    company_id: Optional[int] = None
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None

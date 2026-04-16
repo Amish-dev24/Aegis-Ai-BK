@@ -13,14 +13,14 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    action = Column(String(100), nullable=False)  # e.g., "login", "create_alert", "export_evidence"
-    resource_type = Column(String(50))  # e.g., "detection", "user", "camera"
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    action = Column(String(100), nullable=False, index=True)  # e.g., "login", "create_alert", "export_evidence"
+    resource_type = Column(String(50), index=True)  # e.g., "detection", "user", "camera"
     resource_id = Column(Integer, nullable=True)
     ip_address = Column(String(45))
     user_agent = Column(String(500))
     details = Column(JSON)  # Additional action details
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     # Relationships
     user = relationship("User", back_populates="audit_logs")

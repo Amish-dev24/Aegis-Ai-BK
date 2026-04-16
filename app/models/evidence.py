@@ -12,7 +12,7 @@ class Evidence(Base):
     __tablename__ = "evidence"
     
     id = Column(Integer, primary_key=True, index=True)
-    detection_id = Column(Integer, ForeignKey("detections.id"), nullable=False)
+    detection_id = Column(Integer, ForeignKey("detections.id"), nullable=False, index=True)
     image_path = Column(String(500), nullable=False)  # Path to snapshot image
     video_path = Column(String(500), nullable=True)  # Path to video clip if available
     frame_number = Column(Integer, nullable=True)

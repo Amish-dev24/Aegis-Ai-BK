@@ -4,7 +4,7 @@ All endpoints respect multi-tenant isolation via company access checks.
 """
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Request, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import require_any_authenticated, get_current_user, check_company_access, get_user_company_filter
@@ -12,7 +12,7 @@ from app.schemas.evidence import EvidenceCreate, EvidenceResponse
 from app.models.evidence import Evidence
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.camera import Camera
-from app.models.user import User
+from app.models.user import User, Role
 from app.models.audit_log import create_audit_log
 from pathlib import Path
 from datetime import datetime
@@ -107,7 +107,7 @@ async def list_evidence(
     min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confidence threshold"),
     start_date: Optional[datetime] = Query(None, description="Filter from date"),
     end_date: Optional[datetime] = Query(None, description="Filter to date"),
-    limit: int = Query(50, ge=1, le=500, description="Max results"),
+    limit: int = Query(20, ge=1, le=200, description="Max results"),
     offset: int = Query(0, ge=0, description="Skip results"),
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
@@ -115,13 +115,14 @@ async def list_evidence(
 ):
     """List evidence with filters and pagination. Includes detection context."""
     company_filter = get_user_company_filter(current_user, company_id)
+    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+        return []
 
     query = db.query(Evidence, Detection, Camera).join(
         Detection, Evidence.detection_id == Detection.id
     ).join(
         Camera, Detection.camera_id == Camera.id
     )
-
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
     if detection_id:
@@ -144,6 +145,25 @@ async def list_evidence(
     return [_enrich_evidence(ev, det, cam) for ev, det, cam in results]
 
 
+def _load_evidence_with_detection(evidence_id: int, current_user: User, db: Session):
+    """Single JOIN query to load evidence + detection + camera, then access-check.
+
+    Replaces the previous pattern of 2–3 individual queries per request.
+    """
+    row = (
+        db.query(Evidence, Detection, Camera)
+        .join(Detection, Evidence.detection_id == Detection.id)
+        .join(Camera, Detection.camera_id == Camera.id)
+        .filter(Evidence.id == evidence_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence not found")
+    evidence, detection, camera = row
+    _check_detection_access(detection, current_user)
+    return evidence, detection, camera
+
+
 @router.get("/{evidence_id}", response_model=EvidenceResponse)
 async def get_evidence(
     evidence_id: int,
@@ -152,19 +172,7 @@ async def get_evidence(
     current_user: User = Depends(require_any_authenticated)
 ):
     """Get evidence by ID with detection context."""
-    evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
-    if not evidence:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Evidence not found"
-        )
-
-    detection = db.query(Detection).filter(Detection.id == evidence.detection_id).first()
-    if detection:
-        _check_detection_access(detection, current_user)
-
-    camera = db.query(Camera).filter(Camera.id == detection.camera_id).first() if detection else None
-
+    evidence, detection, camera = _load_evidence_with_detection(evidence_id, current_user, db)
     return _enrich_evidence(evidence, detection, camera)
 
 
@@ -175,28 +183,24 @@ async def view_evidence_image(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated)
 ):
-    """View evidence image inline (for displaying in frontend)."""
-    evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
-    if not evidence:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Evidence not found"
-        )
+    """View evidence image inline (for displaying in frontend).
 
-    detection = db.query(Detection).filter(Detection.id == evidence.detection_id).first()
-    if detection:
-        _check_detection_access(detection, current_user)
+    Returns Cache-Control headers so the browser caches the image for 24 hours
+    and does not re-fetch it every time the evidence tab is opened.
+    """
+    evidence, _det, _cam = _load_evidence_with_detection(evidence_id, current_user, db)
 
     file_path = Path(evidence.image_path)
     if not file_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Evidence file not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence file not found")
 
     return FileResponse(
         path=str(file_path),
-        media_type="image/jpeg"
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, max-age=86400",  # browser caches for 24 h
+            "ETag": str(evidence_id),
+        },
     )
 
 
@@ -208,28 +212,17 @@ async def download_evidence(
     current_user: User = Depends(require_any_authenticated)
 ):
     """Download evidence image file."""
-    evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
-    if not evidence:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Evidence not found"
-        )
-
-    detection = db.query(Detection).filter(Detection.id == evidence.detection_id).first()
-    if detection:
-        _check_detection_access(detection, current_user)
+    evidence, _det, _cam = _load_evidence_with_detection(evidence_id, current_user, db)
 
     file_path = Path(evidence.image_path)
     if not file_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Evidence file not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence file not found")
 
     return FileResponse(
         path=str(file_path),
         filename=file_path.name,
-        media_type="image/jpeg"
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
     )
 
 
@@ -246,11 +239,13 @@ async def export_evidence(
     from io import StringIO
     from fastapi.responses import StreamingResponse
 
-    company_filter = get_user_company_filter(current_user)
+    company_filter = get_user_company_filter(current_user, company_id)
 
     det_query = db.query(Detection).filter(Detection.id.in_(detection_ids))
     if company_filter is not None:
         det_query = det_query.filter(Detection.company_id == company_filter)
+    elif current_user.role != Role.AEGIS_ADMIN:
+        det_query = det_query.filter(False)
 
     detections = det_query.all()
     accessible_ids = [d.id for d in detections]
