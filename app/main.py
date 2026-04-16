@@ -71,6 +71,9 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 # Serve evidence images as static files
 app.mount("/evidence", StaticFiles(directory=settings.EVIDENCE_DIR), name="evidence")
 
+# Serve processed videos directly as a deployment-friendly fallback.
+app.mount("/processed_videos", StaticFiles(directory=settings.PROCESSED_VIDEO_DIR), name="processed_videos")
+
 
 @app.get("/")
 async def root():
