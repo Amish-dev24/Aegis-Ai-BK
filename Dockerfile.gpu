@@ -54,11 +54,15 @@ RUN pip install --no-cache-dir \
     torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu121
 
-# ── Step 2: Install CPU requirements (onnxruntime placeholder installs here) ─
+# ── Step 2: Force numpy<2 — torch pulls numpy 2.x which breaks opencv ────────
+# Must be a separate step AFTER torch so it overrides torch's numpy dependency.
+RUN pip install --no-cache-dir --force-reinstall "numpy>=1.26.0,<2.0"
+
+# ── Step 3: Install CPU requirements ─────────────────────────────────────────
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Step 3: Override onnxruntime → onnxruntime-gpu ───────────────────────────
+# ── Step 4: Override onnxruntime → onnxruntime-gpu ───────────────────────────
 RUN pip install --no-cache-dir --force-reinstall "onnxruntime-gpu>=1.17.0"
 
 # ── Application code ──────────────────────────────────────────────────────────
