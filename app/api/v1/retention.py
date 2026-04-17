@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.config import settings
-from app.core.security import require_admin
+from app.core.security import require_admin, require_aegis_admin
 from app.models.user import User
 from app.services.retention_service import run_retention_cleanup
 
@@ -45,9 +45,9 @@ async def trigger_cleanup(
 @router.post("/purge-all")
 async def purge_all_data(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_aegis_admin),
 ):
-    """Delete ALL detections, evidence, alerts, and logs regardless of age."""
+    """Delete ALL detections, evidence, alerts, and logs regardless of age. Aegis admin only."""
     from app.models.alert_log import AlertLog
     from app.models.alert import Alert
     from app.models.evidence import Evidence
