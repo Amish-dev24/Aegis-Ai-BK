@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Aegis AI Backend — GPU image (NVIDIA Tesla P100 / CUDA 12.1)
+# GCP VM: n1-standard-4 + 1x Tesla P100 (Pascal, sm_60)
+#
+# Requires on the host:
+#   - NVIDIA driver 525+ (supports CUDA 12.x)
+#   - nvidia-container-toolkit  (apt install nvidia-container-toolkit)
+#
+# Build:  docker build -f Dockerfile.gpu -t aegis-bk:gpu .
+# Run:    docker run --gpus all -p 8000:8000 aegis-bk:gpu
+# ─────────────────────────────────────────────────────────────────────────────
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-debian12
+
+# Build-time commit label (injected by deploy.sh via --build-arg)
+ARG COMMIT_ID=unknown
+LABEL org.opencontainers.image.revision=${COMMIT_ID}
+LABEL org.opencontainers.image.description="Aegis AI Backend (GPU/P100)"
+
+# Python 3.11 + system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    python3-venv \
+    gcc \
+    g++ \
+    ffmpeg \
+    postgresql-client \
+    libpq-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.11 the default python/pip
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    ln -sf /usr/bin/pip3 /usr/bin/pip
+
+WORKDIR /app
+
+# ── Step 1: Install PyTorch with CUDA 12.1 BEFORE ultralytics ────────────────
+# This ensures ultralytics reuses the CUDA torch instead of installing CPU torch.
+RUN pip install --no-cache-dir \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# ── Step 2: Install CPU requirements (onnxruntime placeholder installs here) ─
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ── Step 3: Override onnxruntime → onnxruntime-gpu ───────────────────────────
+RUN pip install --no-cache-dir --force-reinstall "onnxruntime-gpu>=1.17.0"
+
+# ── Application code ──────────────────────────────────────────────────────────
+COPY . .
+
+# Stamp commit ID; enable GPU flags for detection service
+ENV AEGIS_COMMIT_ID=${COMMIT_ID}
+ENV ONNX_PREFER_GPU=true
+ENV TORCH_PREFER_GPU=true
+
+RUN mkdir -p uploads evidence models processed_videos
+
+EXPOSE 8000
+
+# 2 uvicorn workers — P100 has 16 GB HBM2, can handle parallel inference
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
