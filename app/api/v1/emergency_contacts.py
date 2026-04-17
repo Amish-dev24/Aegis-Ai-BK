@@ -41,14 +41,21 @@ class EmergencyContactResponse(BaseModel):
 
 @router.get("", response_model=List[EmergencyContactResponse])
 async def list_contacts(
+    company_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
 ):
-    """List emergency contacts for the user's company."""
-    company_filter = current_user.company_id
+    """List emergency contacts. Non-aegis users see only their own company."""
+    from app.models.user import Role
     query = db.query(EmergencyContact)
-    if company_filter is not None:
-        query = query.filter(EmergencyContact.company_id == company_filter)
+    if current_user.role == Role.AEGIS_ADMIN:
+        # Aegis admin: filter by company_id param if provided, else return empty (avoid leaking all)
+        if company_id:
+            query = query.filter(EmergencyContact.company_id == company_id)
+        else:
+            return []
+    else:
+        query = query.filter(EmergencyContact.company_id == current_user.company_id)
     return query.order_by(EmergencyContact.is_primary.desc(), EmergencyContact.name).all()
 
 

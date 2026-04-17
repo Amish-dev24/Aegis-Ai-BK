@@ -262,9 +262,12 @@ async def update_company(
     company_id: int,
     company_update: CompanyUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_aegis_admin)
+    current_user: User = Depends(get_current_user)
 ):
-    """Update company (Aegis AI admin only)."""
+    """Update company. Aegis admin can update any company; company admin can update their own."""
+    if current_user.role != Role.AEGIS_ADMIN:
+        if not check_company_access(current_user, company_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(
