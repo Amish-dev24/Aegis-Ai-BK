@@ -1,0 +1,17 @@
+# GPU requirements — NVIDIA Tesla P100 / any CUDA 12.x GPU
+# Usage:
+#   pip install -r requirements-gpu.txt
+#   (This installs CPU requirements first, then overrides with GPU packages)
+#
+# Requires: CUDA 12.x drivers on host + nvidia-container-toolkit for Docker
+
+# Include all CPU requirements first
+-r requirements.txt
+
+# Override: GPU ONNX Runtime (replaces onnxruntime above — pip resolves latest)
+onnxruntime-gpu>=1.17.0
+
+# PyTorch with CUDA 12.1 — must be installed via the PyTorch index.
+# NOTE: In Docker this is handled in Dockerfile.gpu before pip install.
+# For bare-metal install run this manually FIRST:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121

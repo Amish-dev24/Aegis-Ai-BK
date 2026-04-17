@@ -79,6 +79,12 @@ cpu_cores = os.cpu_count() or 4
 torch.set_num_threads(cpu_cores)
 torch.set_num_interop_threads(max(1, cpu_cores // 2))
 
+# cuDNN autotuner: benchmarks conv algorithms on first run, reuses fastest for consistent input sizes.
+# Safe: YOLO uses fixed 640×640 ONNX_YOLO_IMGSZ, so the autotuner converges quickly.
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False  # deterministic=True disables benchmark; keep False
+
 
 # ---------------------------------------------------------------------------
 # CSRNet architecture (VGG16 frontend + dilated convolution backend)
@@ -191,19 +197,24 @@ def _make_ort_session(model_path: Path):
     return sess
 
 
-def _try_move_yolo_to_cuda(model: Any, model_name: str) -> None:
-    """Move Ultralytics YOLO ``.pt`` model to CUDA when configured and available."""
+def _try_move_yolo_to_cuda(model: Any, model_name: str) -> bool:
+    """
+    Move Ultralytics YOLO ``.pt`` model to CUDA when configured and available.
+    Returns True if model is now on CUDA (so callers can enable FP16 predict).
+    """
     if model is None:
-        return
+        return False
     if not getattr(settings, "TORCH_PREFER_GPU", True):
-        return
+        return False
     if not torch.cuda.is_available():
-        return
+        return False
     try:
         model.to("cuda")
         logger.info("%s: Ultralytics model on CUDA", model_name)
+        return True
     except Exception as e:
         logger.warning("%s: could not use CUDA (%s), using CPU", model_name, e)
+        return False
 
 
 def _log_inference_device_summary() -> None:
@@ -407,7 +418,9 @@ class DetectionService:
         self.weapon_model = None       # YOLOv8 — Bags / Box / Weapons
         # When weapon model is loaded from .onnx (fixed input), cap predict imgsz (see ONNX_YOLO_IMGSZ)
         self._weapon_onnx_imgsz_cap: Optional[int] = None
+        self._weapon_on_cuda: bool = False   # True when .pt model moved to GPU (enables FP16)
         self.face_model = None         # YOLOv8 — covered / uncovered
+        self._face_on_cuda: bool = False     # True when .pt model moved to GPU (enables FP16)
         self.crowd_model = None        # CSRNet / SANet (or "onnx" sentinel when using ONNX)
         self.crowd_onnx_session = None # ONNX Runtime session for crowd density
         self._crowd_onnx_input_name: Optional[str] = None  # first ONNX input name (export may differ from "input")
@@ -451,7 +464,7 @@ class DetectionService:
             from ultralytics import YOLO
         except ImportError:
             logger.warning("ultralytics not installed — %s detection disabled", model_name)
-            return None, None
+            return None, None, False
 
         # Reduce "Loading models... / CPUExecutionProvider" noise on first inference
         logging.getLogger("ultralytics").setLevel(logging.WARNING)
@@ -469,7 +482,8 @@ class DetectionService:
                     model.names,
                     fixed_cap,
                 )
-                return model, fixed_cap
+                # ONNX model: GPU handled by ORT session, not by PyTorch half(); no FP16 flag needed
+                return model, fixed_cap, False
             except Exception as e:
                 logger.warning("Failed to load ONNX %s, falling back: %s", model_name, e)
 
@@ -487,18 +501,18 @@ class DetectionService:
                     model.names,
                     fixed_cap,
                 )
-                return model, fixed_cap
+                return model, fixed_cap, False
             except Exception as e:
                 logger.warning("ONNX export failed for %s, using PyTorch: %s", model_name, e)
 
         try:
             model = YOLO(str(pt_path))
-            _try_move_yolo_to_cuda(model, model_name)
+            on_cuda = _try_move_yolo_to_cuda(model, model_name)
             logger.info("%s loaded from PyTorch: %s — classes: %s", model_name, pt_path, model.names)
-            return model, None
+            return model, None, on_cuda
         except Exception as e:
             logger.error("Failed to load %s: %s", model_name, e)
-            return None, None
+            return None, None, False
 
     def _load_crowd_model(self, crowd_path: Path):
         """Load CSRNet or SANet from settings (``CROWD_MODEL_ARCH``)."""
@@ -741,7 +755,7 @@ class DetectionService:
         # --- 1. YOLOv8 weapon / object model (Bags, Box, Weapons) ---
         weapon_path = Path(settings.MODEL_PATH)
         if weapon_path.exists():
-            self.weapon_model, self._weapon_onnx_imgsz_cap = self._load_yolo_onnx(
+            self.weapon_model, self._weapon_onnx_imgsz_cap, self._weapon_on_cuda = self._load_yolo_onnx(
                 weapon_path, "Weapon"
             )
         else:
@@ -750,7 +764,7 @@ class DetectionService:
         # --- 2. YOLOv8 face model (covered / uncovered) ---
         face_path = Path(settings.FACE_MODEL_PATH)
         if face_path.exists():
-            self.face_model, _ = self._load_yolo_onnx(face_path, "Face")
+            self.face_model, _, self._face_on_cuda = self._load_yolo_onnx(face_path, "Face")
         else:
             logger.warning("Face model not found at %s — face detection disabled", face_path)
 
@@ -918,7 +932,8 @@ class DetectionService:
         if self._weapon_onnx_imgsz_cap is not None:
             infer_sz = min(infer_sz, self._weapon_onnx_imgsz_cap)
         results = self.weapon_model(
-            frame, conf=conf, imgsz=infer_sz, verbose=False
+            frame, conf=conf, imgsz=infer_sz, verbose=False,
+            half=self._weapon_on_cuda,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
         )
 
         weapons = []
@@ -1201,7 +1216,7 @@ class DetectionService:
                     self.violence_pt_model.to(dev)
                     tensor = torch.from_numpy(clip).to(dev)
                     self.violence_pt_model.eval()
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         logits = self.violence_pt_model(tensor)[0].cpu().numpy()
 
                 # Softmax to get probabilities
@@ -1340,7 +1355,10 @@ class DetectionService:
             return []
 
         h, w = frame.shape[:2]
-        results = self.face_model(frame, conf=self.confidence_threshold, verbose=False)
+        results = self.face_model(
+            frame, conf=self.confidence_threshold, verbose=False,
+            half=self._face_on_cuda,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
+        )
         detections: List[Dict[str, Any]] = []
 
         for result in results:
@@ -1415,7 +1433,7 @@ class DetectionService:
             density_map = outputs[0]
             density_sum = float(np.sum(density_map))
         else:
-            with torch.no_grad():
+            with torch.inference_mode():
                 density_tensor = self.crowd_model(input_tensor)
             density_map = density_tensor.cpu().numpy()
             density_sum = float(density_tensor.sum().item())
@@ -1581,7 +1599,7 @@ class DetectionService:
                     density_sum = float(density_map.sum())
                 else:
                     # Fallback: PyTorch
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         density_tensor = self.crowd_model(input_tensor)
                     density_map = density_tensor.cpu().numpy()
                     density_sum = float(density_tensor.sum().item())
