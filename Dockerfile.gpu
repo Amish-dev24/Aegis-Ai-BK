@@ -16,8 +16,13 @@ ARG COMMIT_ID=unknown
 LABEL org.opencontainers.image.revision=${COMMIT_ID}
 LABEL org.opencontainers.image.description="Aegis AI Backend (GPU/P100)"
 
+# Prevent ANY interactive prompts during apt (timezone, keyboard, etc.)
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
 # Python 3.11 + system dependencies (Ubuntu 22.04 has python3.10 by default, add deadsnakes for 3.11)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
     software-properties-common \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
