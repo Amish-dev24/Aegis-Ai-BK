@@ -9,33 +9,37 @@
 # Build:  docker build -f Dockerfile.gpu -t aegis-bk:gpu .
 # Run:    docker run --gpus all -p 8000:8000 aegis-bk:gpu
 # ─────────────────────────────────────────────────────────────────────────────
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-debian12
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 # Build-time commit label (injected by deploy.sh via --build-arg)
 ARG COMMIT_ID=unknown
 LABEL org.opencontainers.image.revision=${COMMIT_ID}
 LABEL org.opencontainers.image.description="Aegis AI Backend (GPU/P100)"
 
-# Python 3.11 + system dependencies
+# Python 3.11 + system dependencies (Ubuntu 22.04 has python3.10 by default, add deadsnakes for 3.11)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-dev \
-    python3-pip \
-    python3-venv \
+    python3.11-distutils \
     gcc \
     g++ \
     ffmpeg \
-    postgresql-client \
     libpq-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Make python3.11 the default python/pip
+# Install pip for python3.11
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+
+# Make python3.11 the default
 RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.11 /usr/bin/python && \
-    ln -sf /usr/bin/pip3 /usr/bin/pip
+    ln -sf /usr/local/bin/pip /usr/bin/pip
 
 WORKDIR /app
 
