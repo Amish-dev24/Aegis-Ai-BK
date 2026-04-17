@@ -57,13 +57,12 @@ app = FastAPI(
     description="End-to-end intelligent surveillance platform with AI-powered threat detection",
     version="1.0.0",
     lifespan=lifespan,
-    # Disable docs in production to reduce attack surface
-    docs_url="/docs" if settings.DEBUG else None,
-    redoc_url="/redoc" if settings.DEBUG else None,
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 # CORS middleware — restrict origins in production
-allowed_origins = ["*"] if settings.DEBUG else settings.ALLOWED_ORIGINS.split(",") if settings.ALLOWED_ORIGINS else []
+allowed_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
