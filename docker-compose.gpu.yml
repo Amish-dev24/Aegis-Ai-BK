@@ -35,13 +35,8 @@ services:
         COMMIT_ID: ${COMMIT_ID:-unknown}
     image: aegis-bk-gpu:${COMMIT_ID:-latest}
     restart: unless-stopped
-    # ── Tesla P100: pass GPU devices directly (CDI-compatible, no legacy hook) ─
-    devices:
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia-uvm:/dev/nvidia-uvm
-      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
-      - /dev/nvidia-modeset:/dev/nvidia-modeset
+    # ── Tesla P100: nvidia runtime in CDI mode (set in /etc/nvidia-container-runtime/config.toml)
+    runtime: nvidia
     volumes:
       - ./uploads:/app/uploads
       - ./evidence:/app/evidence
@@ -56,6 +51,8 @@ services:
       ONNX_PREFER_GPU: "true"
       TORCH_PREFER_GPU: "true"
       CUDA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     depends_on:
       redis:
         condition: service_healthy
