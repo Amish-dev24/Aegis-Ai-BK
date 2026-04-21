@@ -105,7 +105,11 @@ def _job_meta_path(job_id: str) -> Path:
 
 
 def _save_job_to_disk(job: dict) -> None:
-    """Persist completed/failed job state to a JSON sidecar file."""
+    """Persist job state to a JSON sidecar file.
+
+    Called on creation, completion, and failure so the job is always
+    recoverable across server/container restarts.
+    """
     try:
         payload = {k: v for k, v in job.items() if k not in _JOB_TRANSIENT_FIELDS}
         _job_meta_path(job["job_id"]).write_text(
@@ -116,29 +120,50 @@ def _save_job_to_disk(job: dict) -> None:
 
 
 def load_jobs_from_disk() -> None:
-    """Reload completed/failed jobs from sidecar JSON files into _jobs.
+    """Reload jobs from sidecar JSON files into _jobs on startup.
 
-    Called once at server startup so results survive process restarts.
+    Any job that was still queued/processing when the process died is marked
+    as failed so the frontend receives a clean 'failed' status instead of a
+    404 Not Found.
     """
     meta_dir = Path(settings.PROCESSED_VIDEO_DIR)
     if not meta_dir.exists():
         return
-    loaded = 0
+    loaded = failed_rescued = 0
     for meta_file in meta_dir.glob(f"*{_JOB_META_SUFFIX}"):
         try:
             data = json.loads(meta_file.read_text(encoding="utf-8"))
             job_id = data.get("job_id")
-            if job_id and job_id not in _jobs:
-                # Ensure required runtime keys exist with safe defaults
-                data.setdefault("detections", [])
-                data.setdefault("upload_path", "")
-                data.setdefault("_pdb", 0)
-                _jobs[job_id] = data
-                loaded += 1
+            if not job_id or job_id in _jobs:
+                continue
+            # Ensure required runtime keys exist with safe defaults
+            data.setdefault("detections", [])
+            data.setdefault("upload_path", "")
+            data.setdefault("_pdb", 0)
+            # Jobs that were in-flight when the server died → mark failed so
+            # the frontend gets a descriptive error instead of 404.
+            if data.get("status") not in ("completed", "failed"):
+                data["status"] = "failed"
+                data["error"] = (
+                    "Processing was interrupted because the server restarted. "
+                    "Please re-upload the video to start a new job."
+                )
+                data["progress"] = 0
+                # Persist the updated state so repeat restarts are idempotent
+                try:
+                    meta_file.write_text(json.dumps(data, default=str), encoding="utf-8")
+                except Exception:
+                    pass
+                failed_rescued += 1
+            _jobs[job_id] = data
+            loaded += 1
         except Exception as exc:
             logger.warning("Could not load job metadata from %s: %s", meta_file, exc)
     if loaded:
-        logger.info("Restored %d completed video job(s) from disk.", loaded)
+        logger.info(
+            "Restored %d video job(s) from disk (%d marked failed due to restart).",
+            loaded, failed_rescued,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +329,10 @@ async def start_video_processing(
         "process_every_n": process_every_n,
         "process_fps": process_fps,
     }
+
+    # Persist immediately so the job is always findable even if the container
+    # restarts before processing completes (avoids 404 mid-process).
+    _save_job_to_disk(_jobs[job_id])
 
     loop = asyncio.get_event_loop()
     loop.run_in_executor(_thread_pool, _process_video_sync, job_id)

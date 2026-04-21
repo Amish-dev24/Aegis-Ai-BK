@@ -1083,10 +1083,12 @@ class DetectionService:
             self._finalize_async_crowd_result(wait_for_first=True)
 
             # Reuse previous crowd result every frame (until next async result arrives).
-            # Do not surface crowd as a "detection" when estimated count is 0 (no DB/UI noise).
+            # Do not surface crowd as a "detection" when estimated count is below
+            # the minimum threshold (avoids DB/UI noise from empty / sparse scenes).
+            _crowd_min = max(0, int(getattr(settings, "CROWD_MIN_PEOPLE_COUNT", 5)))
             if self._last_crowd_result is not None:
                 crowd_out = dict(self._last_crowd_result)
-                if int(crowd_out.get("count", 0) or 0) < 1:
+                if int(crowd_out.get("count", 0) or 0) < max(1, _crowd_min):
                     pass
                 else:
                     is_fresh_result = (
@@ -1529,9 +1531,42 @@ class DetectionService:
             cal_scale = float(np.median(np.array(cal_interim, dtype=np.float64)))
         else:
             cal_scale = float(getattr(settings, "CROWD_CALIBRATION_SCALE", 1.0))
-        raw_count = max(0.0, density_sum * cal_scale)
+
+        # ── Density-map significance filter (same logic as CSRNet) ──────────
+        # An empty surface / uniform texture produces a nearly flat density map.
+        # Real crowd activations always have sharp local peaks (people heads)
+        # visible as a high peak_ratio AND high coefficient-of-variation.
+        # Reject the result when both are below threshold → avoids false positives
+        # on floors, walls, desks, etc.
+        map_max  = float(raw_density_map.max())
+        map_mean = float(raw_density_map.mean()) if raw_density_map.size > 0 else 0.0
+        map_std  = float(raw_density_map.std())  if raw_density_map.size > 0 else 0.0
+
+        peak_ratio = map_max  / (map_mean + 1e-8)
+        cv_ratio   = map_std  / (map_mean + 1e-8)
+
+        sanet_peak_thresh = float(getattr(settings, "CROWD_SANET_PEAK_RATIO_MIN", 3.0))
+        sanet_cv_thresh   = float(getattr(settings, "CROWD_SANET_CV_RATIO_MIN",   1.0))
+        is_noise = peak_ratio < sanet_peak_thresh and cv_ratio < sanet_cv_thresh
+
+        if getattr(settings, "CROWD_DEBUG_LOG", False):
+            logger.info(
+                "[sanet filter] peak_ratio=%.2f cv_ratio=%.2f raw_sum=%.4f → %s",
+                peak_ratio, cv_ratio, density_sum,
+                "REJECTED (noise/surface)" if is_noise else "ACCEPTED",
+            )
+
+        if is_noise:
+            return {
+                "count": 0,
+                "density": 0.0,
+                "confidence": 0.0,
+                "density_map_normalized": np.zeros((h0, w0), dtype=np.uint8),
+            }
+
+        raw_count    = max(0.0, density_sum * cal_scale)
         person_count = max(0, int(round(raw_count)))
-        density = min(1.0, person_count / 50.0)
+        density      = min(1.0, person_count / 50.0)
 
         # Heatmap matches SANet notebook: resize density → full frame, clip, / max → uint8 (then JET in video_service)
         hm = cv2.resize(

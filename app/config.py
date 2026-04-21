@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     CROWD_HEATMAP_FRAME_WEIGHT: float = 0.65  # cv2.addWeighted: frame alpha (overlay gets 1 - this)
     # Terminal debug for video pipeline (count, density, cached, persisted)
     CROWD_DEBUG_LOG: bool = True
+    # Minimum estimated people count before a crowd result is surfaced as a
+    # detection.  The density-map filter below handles empty-scene noise;
+    # this is the final count-level gate.  3 = detect small groups, skip
+    # 1-2 person false-positives from calibration noise.
+    CROWD_MIN_PEOPLE_COUNT: int = 3
+    # SANet density-map significance thresholds (mirrors CSRNet false-positive filter).
+    # A flat/uniform density map (empty room, floor, surface) has low peak_ratio AND
+    # low CV ratio.  Results below BOTH thresholds are discarded as noise.
+    # Lower values = more permissive (risk FP); higher = more strict (risk FN).
+    CROWD_SANET_PEAK_RATIO_MIN: float = 3.0   # peak / mean  — must exceed for real crowd
+    CROWD_SANET_CV_RATIO_MIN:   float = 1.0   # std  / mean  — must exceed for real crowd
     # Threat levels for crowd: use estimated people count vs density ratio
     CROWD_THREAT_USE_PEOPLE_COUNT: bool = True
     # value = min(1, count / CROWD_THREAT_MAX_PEOPLE_SCALE) for threshold compare (e.g. 0.7 high ≈ 70 people if scale=100)
