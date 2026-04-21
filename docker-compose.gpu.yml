@@ -35,14 +35,11 @@ services:
         COMMIT_ID: ${COMMIT_ID:-unknown}
     image: aegis-bk-gpu:${COMMIT_ID:-latest}
     restart: unless-stopped
-    # ── Tesla P100: expose GPU to this container ──────────────────────────────
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # ── Tesla P100: expose GPU via CDI (bypasses legacy hook issues) ──────────
+    devices:
+      - driver: cdi
+        device_ids:
+          - nvidia.com/gpu=all
     volumes:
       - ./uploads:/app/uploads
       - ./evidence:/app/evidence
