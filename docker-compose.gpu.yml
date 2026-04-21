@@ -35,11 +35,13 @@ services:
         COMMIT_ID: ${COMMIT_ID:-unknown}
     image: aegis-bk-gpu:${COMMIT_ID:-latest}
     restart: unless-stopped
-    # ── Tesla P100: expose GPU via CDI (bypasses legacy hook issues) ──────────
+    # ── Tesla P100: pass GPU devices directly (CDI-compatible, no legacy hook) ─
     devices:
-      - driver: cdi
-        device_ids:
-          - nvidia.com/gpu=all
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+      - /dev/nvidia-modeset:/dev/nvidia-modeset
     volumes:
       - ./uploads:/app/uploads
       - ./evidence:/app/evidence
