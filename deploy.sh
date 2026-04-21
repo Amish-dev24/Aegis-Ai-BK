@@ -70,10 +70,14 @@ else
 fi
 
 # ── 4. Build image tagged with commit hash ───────────────────────────────────
+# Use --no-cache only when explicitly requested (FRESH_BUILD=true ./deploy.sh)
 info "Building image aegis-bk:${SHORT_ID} …"
-COMMIT_ID="$COMMIT_ID" docker compose -f "$COMPOSE_FILE" build \
-  --build-arg COMMIT_ID="$COMMIT_ID" \
-  --no-cache
+BUILD_FLAGS="--build-arg COMMIT_ID=$COMMIT_ID"
+if [ "${FRESH_BUILD:-}" = "true" ]; then
+  warn "FRESH_BUILD=true — ignoring Docker cache (slow, use only when requirements.txt changed)"
+  BUILD_FLAGS="$BUILD_FLAGS --no-cache"
+fi
+COMMIT_ID="$COMMIT_ID" docker compose -f "$COMPOSE_FILE" build $BUILD_FLAGS
 
 # Tag with short hash for easy rollback
 docker tag "$(docker compose -f "$COMPOSE_FILE" images -q api 2>/dev/null | head -1)" \
