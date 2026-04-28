@@ -1,15 +1,19 @@
 """
 Detection models for storing AI detection results.
 """
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, Enum, JSON, Index
+
+import enum
+
+from sqlalchemy import JSON, Column, DateTime, Enum, Float, ForeignKey, Index, Integer
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-import enum
+
 from app.database import Base
 
 
 class DetectionType(str, enum.Enum):
     """Types of detections."""
+
     WEAPON = "weapon"
     VIOLENCE = "violence"
     ABANDONED_OBJECT = "abandoned_object"
@@ -19,6 +23,7 @@ class DetectionType(str, enum.Enum):
 
 class ThreatLevel(str, enum.Enum):
     """Threat level classification."""
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -27,6 +32,7 @@ class ThreatLevel(str, enum.Enum):
 
 class Detection(Base):
     """Detection model for storing AI detection results."""
+
     __tablename__ = "detections"
 
     __table_args__ = (
@@ -62,4 +68,3 @@ class Detection(Base):
     company = relationship("Company", back_populates="detections")
     alerts = relationship("Alert", back_populates="detection")
     evidence = relationship("Evidence", back_populates="detection")
-

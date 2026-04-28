@@ -1,23 +1,25 @@
 """
 Configuration settings for Aegis AI backend.
 """
-from pydantic_settings import BaseSettings
-from typing import Optional
+
 import os
+from typing import Optional
+
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
-    
+
     # Database
     DATABASE_URL: str = "postgresql://postgres:1234@localhost:5432/aegis_db"
-    
+
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_HOURS: int = 2
-    
+
     # Email
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
@@ -25,15 +27,17 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = "noreply@aegisai.com"
     SMTP_FROM_NAME: str = "Aegis AI Security System"
-    
+
     # Detection Models
-    MODEL_PATH: str = "./models/weapon-box-bags-v3.pt"         # YOLO — Bags, Box, Weapons (v3)
-    FACE_MODEL_PATH: str = "./models/face_detection.pt"        # YOLOv8 — covered, uncovered
+    MODEL_PATH: str = "./models/weapon-box-bags-v3.pt"  # YOLO — Bags, Box, Weapons (v3)
+    FACE_MODEL_PATH: str = "./models/face_detection.pt"  # YOLOv8 — covered, uncovered
     # Prefer .pth + auto single-file ONNX if split .onnx/.onnx.data is broken; or set path to merged .onnx only
     CROWD_MODEL_PATH: str = "./models/sanet_partB_best.onnx"
     # "sanet" (default, ShanghaiTech Part-B) | "csrnet" (ImageNet norm + VGG CSRNet weights)
     CROWD_MODEL_ARCH: str = "sanet"
-    CROWD_INFERENCE_MAX_SIDE: int = 512  # Speed profile for CPU; increase only if you need more detail
+    CROWD_INFERENCE_MAX_SIDE: int = (
+        512  # Speed profile for CPU; increase only if you need more detail
+    )
     # Performance: run SANet every N analyzed frames and reuse previous crowd result
     CROWD_EVERY_N_ANALYSIS_FRAMES: int = 20
     # Max wait for one crowd inference task before reusing last result
@@ -54,7 +58,9 @@ class Settings(BaseSettings):
     CROWD_CALIBRATION_SAMPLE_FRAMES: int = 8
     # If you know headcount (e.g. 22), set this to skip YOLO drift: scale = EXPECTED / raw_sum
     CROWD_CALIBRATION_EXPECTED_COUNT: Optional[int] = None
-    CROWD_CALIBRATION_SCALE: float = 1.0  # Used when auto-calibration is off or YOLO weights are missing
+    CROWD_CALIBRATION_SCALE: float = (
+        1.0  # Used when auto-calibration is off or YOLO weights are missing
+    )
     # Heatmap (matches SANet notebook: resize → clip → /max → COLORMAP_JET → blend)
     CROWD_HEATMAP_COLORMAP: str = "jet"  # jet | hot | inferno
     CROWD_HEATMAP_FRAME_WEIGHT: float = 0.65  # cv2.addWeighted: frame alpha (overlay gets 1 - this)
@@ -69,13 +75,13 @@ class Settings(BaseSettings):
     # A flat/uniform density map (empty room, floor, surface) has low peak_ratio AND
     # low CV ratio.  Results below BOTH thresholds are discarded as noise.
     # Lower values = more permissive (risk FP); higher = more strict (risk FN).
-    CROWD_SANET_PEAK_RATIO_MIN: float = 3.0   # peak / mean  — must exceed for real crowd
-    CROWD_SANET_CV_RATIO_MIN:   float = 1.0   # std  / mean  — must exceed for real crowd
+    CROWD_SANET_PEAK_RATIO_MIN: float = 3.0  # peak / mean  — must exceed for real crowd
+    CROWD_SANET_CV_RATIO_MIN: float = 1.0  # std  / mean  — must exceed for real crowd
     # Threat levels for crowd: use estimated people count vs density ratio
     CROWD_THREAT_USE_PEOPLE_COUNT: bool = True
     # value = min(1, count / CROWD_THREAT_MAX_PEOPLE_SCALE) for threshold compare (e.g. 0.7 high ≈ 70 people if scale=100)
     CROWD_THREAT_MAX_PEOPLE_SCALE: float = 100.0
-    POSE_MODEL_PATH: str = "./models/pose_estimation.pb"       # MediaPipe (optional)
+    POSE_MODEL_PATH: str = "./models/pose_estimation.pb"  # MediaPipe (optional)
     # Conv3D violence (v2): PyTorch checkpoint; ONNX is same basename + .onnx (auto-export on startup)
     VIOLENCE_MODEL_PT_PATH: str = "./models/violence_model_v2.pt"
     # If empty, derived from VIOLENCE_MODEL_PT_PATH (e.g. violence_model_v2.onnx)
@@ -100,22 +106,22 @@ class Settings(BaseSettings):
     ONNX_PREFER_GPU: bool = True
     # Ultralytics ``.pt`` / PyTorch weights: move to CUDA when available
     TORCH_PREFER_GPU: bool = True
-    
+
     # File Storage
     UPLOAD_DIR: str = "./uploads"
     EVIDENCE_DIR: str = "./evidence"
     PROCESSED_VIDEO_DIR: str = "./processed_videos"
     MAX_FILE_SIZE_MB: int = 500
-    
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
-    
+
     # Application
     API_V1_PREFIX: str = "/api/v1"
     DEBUG: bool = True
     ENVIRONMENT: str = "development"
     ALLOWED_ORIGINS: str = ""  # Comma-separated origins for CORS in production
-    
+
     # Twilio SMS
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
@@ -127,7 +133,7 @@ class Settings(BaseSettings):
     # TLS/SSL
     SSL_CERT_PATH: Optional[str] = None
     SSL_KEY_PATH: Optional[str] = None
-    
+
     class Config:
         env_file = ".env"
         case_sensitive = True
@@ -140,4 +146,3 @@ os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(settings.EVIDENCE_DIR, exist_ok=True)
 os.makedirs(settings.PROCESSED_VIDEO_DIR, exist_ok=True)
 os.makedirs("./models", exist_ok=True)
-

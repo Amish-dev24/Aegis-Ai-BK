@@ -1,14 +1,21 @@
 """
 Emergency contact directory endpoints.
 """
-from typing import List, Optional
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from fastapi import Request, Query, APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+
+from app.core.security import (
+    check_company_access,
+    require_admin,
+    require_any_authenticated,
+)
 from app.database import get_db
-from app.core.security import require_admin, require_any_authenticated, check_company_access, get_user_company_filter
-from app.models.user import User
 from app.models.emergency_contact import EmergencyContact
+from app.models.user import User
 
 router = APIRouter(prefix="/emergency-contacts", tags=["emergency-contacts"])
 
@@ -39,7 +46,7 @@ class EmergencyContactResponse(BaseModel):
         from_attributes = True
 
 
-@router.get("", response_model=List[EmergencyContactResponse])
+@router.get("", response_model=list[EmergencyContactResponse])
 async def list_contacts(
     company_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
@@ -47,6 +54,7 @@ async def list_contacts(
 ):
     """List emergency contacts. Non-aegis users see only their own company."""
     from app.models.user import Role
+
     query = db.query(EmergencyContact)
     if current_user.role == Role.AEGIS_ADMIN:
         # Aegis admin: filter by company_id param if provided, else return empty (avoid leaking all)

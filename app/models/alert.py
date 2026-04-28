@@ -1,15 +1,19 @@
 """
 Alert model for managing security alerts.
 """
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Text, Enum, Index
+
+import enum
+
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-import enum
+
 from app.database import Base
 
 
 class AlertStatus(str, enum.Enum):
     """Alert status."""
+
     PENDING = "pending"
     SENT = "sent"
     ACKNOWLEDGED = "acknowledged"
@@ -19,6 +23,7 @@ class AlertStatus(str, enum.Enum):
 
 class Alert(Base):
     """Alert model for security notifications."""
+
     __tablename__ = "alerts"
 
     __table_args__ = (
@@ -40,9 +45,8 @@ class Alert(Base):
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+
     # Relationships
     detection = relationship("Detection", back_populates="alerts")
     company = relationship("Company", back_populates="alerts")
     logs = relationship("AlertLog", back_populates="alert", order_by="AlertLog.created_at")
-

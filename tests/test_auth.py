@@ -6,13 +6,14 @@ Tests for authentication endpoints:
   POST /api/v1/auth/signup
   POST /api/v1/auth/register
 """
-import pytest
 
+import pytest
 
 BASE = "/api/v1/auth"
 
 
 # ── Login ─────────────────────────────────────────────────────────────────────
+
 
 class TestLogin:
     def test_login_success_officer(self, client, officer):
@@ -51,8 +52,9 @@ class TestLogin:
 
     def test_login_inactive_user(self, client, db):
         """Inactive users must be rejected."""
-        from app.models.user import User, Role
         from app.core.security import get_password_hash
+        from app.models.user import Role, User
+
         user = User(
             username="inactive_ci",
             email="inactive@example.com",
@@ -71,6 +73,7 @@ class TestLogin:
 
 
 # ── Refresh token ─────────────────────────────────────────────────────────────
+
 
 class TestRefreshToken:
     def test_refresh_with_valid_token(self, client, officer):
@@ -100,6 +103,7 @@ class TestRefreshToken:
 
 # ── /me ───────────────────────────────────────────────────────────────────────
 
+
 class TestGetMe:
     def test_me_returns_current_user(self, client, officer_headers, officer):
         resp = client.get(f"{BASE}/me", headers=officer_headers)
@@ -124,6 +128,7 @@ class TestGetMe:
 
 
 # ── Signup (public) ───────────────────────────────────────────────────────────
+
 
 class TestSignup:
     def test_signup_creates_inactive_viewer(self, client, test_company):
@@ -173,6 +178,7 @@ class TestSignup:
 
 
 # ── Register (admin only) ─────────────────────────────────────────────────────
+
 
 class TestRegister:
     def test_register_by_admin(self, client, admin_headers, test_company):

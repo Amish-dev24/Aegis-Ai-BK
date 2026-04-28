@@ -4,11 +4,13 @@ Tests for evidence endpoints:
   GET  /api/v1/evidence/{id}
   POST /api/v1/evidence/export
 """
+
 import pytest
 
 # Detect pandas / numpy binary incompatibility in the current environment
 try:
     import pandas  # noqa: F401
+
     _PANDAS_OK = True
 except (ImportError, ValueError):
     _PANDAS_OK = False

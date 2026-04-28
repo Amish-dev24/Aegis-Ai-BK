@@ -1,13 +1,16 @@
 """
 Pydantic schemas for camera management.
 """
-from pydantic import BaseModel
+
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel
 
 
 class CameraBase(BaseModel):
     """Base camera schema."""
+
     name: str
     location: Optional[str] = None
     description: Optional[str] = None
@@ -19,11 +22,13 @@ class CameraBase(BaseModel):
 
 class CameraCreate(CameraBase):
     """Schema for creating a camera."""
+
     company_id: Optional[int] = None  # Required for company users, optional for Aegis AI admins
 
 
 class CameraUpdate(BaseModel):
     """Schema for updating a camera."""
+
     name: Optional[str] = None
     location: Optional[str] = None
     description: Optional[str] = None
@@ -36,6 +41,7 @@ class CameraUpdate(BaseModel):
 
 class CameraResponse(CameraBase):
     """Schema for camera response."""
+
     id: int
     company_id: Optional[int] = None
     is_active: bool
@@ -44,4 +50,3 @@ class CameraResponse(CameraBase):
 
     class Config:
         from_attributes = True
-

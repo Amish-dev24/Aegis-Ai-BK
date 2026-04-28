@@ -16,17 +16,21 @@ Performance optimizations:
 - Lighter optical flow parameters
 - Frame-similarity check to skip unchanged frames
 """
+
+import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
 import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Any
-from datetime import datetime
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-import threading
-import logging
+
 from app.config import settings
 from app.models.detection import DetectionType, ThreatLevel
 from app.services.violence_model import ViolenceClassifier
@@ -63,6 +67,7 @@ def _is_weapon_class(cls_name: str) -> bool:
 # Try to import ONNX Runtime — falls back to PyTorch if unavailable
 try:
     import onnxruntime as ort
+
     ORT_AVAILABLE = True
     # Optimize thread count for CPU — use physical cores (not hyperthreads)
     cpu_cores = os.cpu_count() or 4
@@ -72,7 +77,9 @@ except ImportError:
     ORT_AVAILABLE = False
     ort = None  # type: ignore
     cpu_cores = os.cpu_count() or 4
-    logger.warning("onnxruntime not installed — using PyTorch (slower). Install with: pip install onnxruntime")
+    logger.warning(
+        "onnxruntime not installed — using PyTorch (slower). Install with: pip install onnxruntime"
+    )
 
 # Optimize PyTorch CPU threads (for CSRNet fallback)
 cpu_cores = os.cpu_count() or 4
@@ -97,31 +104,47 @@ class CSRNet(nn.Module):
         # VGG-16 conv layers up to pool4 — matches checkpoint frontend.0 … frontend.21
         self.frontend = nn.Sequential(
             # Block 1
-            nn.Conv2d(3, 64, 3, padding=1), nn.ReLU(inplace=True),     # 0, 1
-            nn.Conv2d(64, 64, 3, padding=1), nn.ReLU(inplace=True),    # 2, 3
-            nn.MaxPool2d(2, 2),                                         # 4
+            nn.Conv2d(3, 64, 3, padding=1),
+            nn.ReLU(inplace=True),  # 0, 1
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.ReLU(inplace=True),  # 2, 3
+            nn.MaxPool2d(2, 2),  # 4
             # Block 2
-            nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(inplace=True),   # 5, 6
-            nn.Conv2d(128, 128, 3, padding=1), nn.ReLU(inplace=True),  # 7, 8
-            nn.MaxPool2d(2, 2),                                         # 9
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(inplace=True),  # 5, 6
+            nn.Conv2d(128, 128, 3, padding=1),
+            nn.ReLU(inplace=True),  # 7, 8
+            nn.MaxPool2d(2, 2),  # 9
             # Block 3
-            nn.Conv2d(128, 256, 3, padding=1), nn.ReLU(inplace=True),  # 10, 11
-            nn.Conv2d(256, 256, 3, padding=1), nn.ReLU(inplace=True),  # 12, 13
-            nn.Conv2d(256, 256, 3, padding=1), nn.ReLU(inplace=True),  # 14, 15
-            nn.MaxPool2d(2, 2),                                         # 16
+            nn.Conv2d(128, 256, 3, padding=1),
+            nn.ReLU(inplace=True),  # 10, 11
+            nn.Conv2d(256, 256, 3, padding=1),
+            nn.ReLU(inplace=True),  # 12, 13
+            nn.Conv2d(256, 256, 3, padding=1),
+            nn.ReLU(inplace=True),  # 14, 15
+            nn.MaxPool2d(2, 2),  # 16
             # Block 4
-            nn.Conv2d(256, 512, 3, padding=1), nn.ReLU(inplace=True),  # 17, 18
-            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(inplace=True),  # 19, 20
-            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(inplace=True),  # 21, 22
+            nn.Conv2d(256, 512, 3, padding=1),
+            nn.ReLU(inplace=True),  # 17, 18
+            nn.Conv2d(512, 512, 3, padding=1),
+            nn.ReLU(inplace=True),  # 19, 20
+            nn.Conv2d(512, 512, 3, padding=1),
+            nn.ReLU(inplace=True),  # 21, 22
         )
         # Dilated convolution backend (input: 512 channels from block 4)
         self.backend = nn.Sequential(
-            nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(inplace=True),
-            nn.Conv2d(512, 256, 3, padding=2, dilation=2), nn.ReLU(inplace=True),
-            nn.Conv2d(256, 128, 3, padding=2, dilation=2), nn.ReLU(inplace=True),
-            nn.Conv2d(128, 64, 3, padding=2, dilation=2), nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, 3, padding=2, dilation=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, 3, padding=2, dilation=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, 3, padding=2, dilation=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 256, 3, padding=2, dilation=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 128, 3, padding=2, dilation=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 64, 3, padding=2, dilation=2),
+            nn.ReLU(inplace=True),
         )
         self.output_layer = nn.Conv2d(64, 1, 1)
 
@@ -132,16 +155,16 @@ class CSRNet(nn.Module):
         return x
 
 
-def _strip_module_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+def _strip_module_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
     """Remove ``module.`` prefix from DataParallel checkpoints."""
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for k, v in state_dict.items():
         nk = k[7:] if k.startswith("module.") else k
         out[nk] = v
     return out
 
 
-def _resolve_ort_providers() -> List[str]:
+def _resolve_ort_providers() -> list[str]:
     """
     Prefer CUDA when ``onnxruntime-gpu`` is installed and ``ONNX_PREFER_GPU`` is true.
     CPU-only wheels expose only ``CPUExecutionProvider``.
@@ -171,9 +194,7 @@ def _make_ort_session(model_path: Path):
         so.intra_op_num_threads = cpu_cores
         so.inter_op_num_threads = max(1, cpu_cores // 2)
     try:
-        sess = ort.InferenceSession(
-            str(model_path), sess_options=so, providers=providers
-        )
+        sess = ort.InferenceSession(str(model_path), sess_options=so, providers=providers)
     except Exception as e:
         if len(providers) > 1:
             logger.warning(
@@ -219,7 +240,7 @@ def _try_move_yolo_to_cuda(model: Any, model_name: str) -> bool:
 
 def _log_inference_device_summary() -> None:
     """One-time terminal summary: ONNX Runtime and PyTorch GPU vs CPU."""
-    parts: List[str] = []
+    parts: list[str] = []
 
     if ORT_AVAILABLE and ort is not None:
         try:
@@ -228,14 +249,14 @@ def _log_inference_device_summary() -> None:
             available = ["(unknown)"]
         chosen = _resolve_ort_providers()
         if chosen and chosen[0] == "CUDAExecutionProvider":
-            parts.append("ONNX Runtime=new sessions use GPU (CUDAExecutionProvider) with CPU fallback")
+            parts.append(
+                "ONNX Runtime=new sessions use GPU (CUDAExecutionProvider) with CPU fallback"
+            )
         elif not bool(getattr(settings, "ONNX_PREFER_GPU", True)):
             parts.append("ONNX Runtime=CPU only (ONNX_PREFER_GPU=false)")
         else:
-            parts.append(
-                "ONNX Runtime=CPU only (install onnxruntime-gpu + NVIDIA driver for CUDA)"
-            )
-        parts.append("ONNX available providers=%s" % available)
+            parts.append("ONNX Runtime=CPU only (install onnxruntime-gpu + NVIDIA driver for CUDA)")
+        parts.append(f"ONNX available providers={available}")
     else:
         parts.append("ONNX Runtime=not loaded")
 
@@ -244,7 +265,7 @@ def _log_inference_device_summary() -> None:
             name = torch.cuda.get_device_name(0)
         except Exception:
             name = "device 0"
-        parts.append("PyTorch CUDA=available (%s)" % name)
+        parts.append(f"PyTorch CUDA=available ({name})")
     else:
         parts.append("PyTorch CUDA=not available (Ultralytics .pt runs on CPU)")
 
@@ -272,7 +293,7 @@ def _log_aegis_device_banner(crowd_sess, violence_sess) -> None:
     """
     c_prov = _session_primary_provider(crowd_sess)
     v_prov = _session_primary_provider(violence_sess)
-    onnx_cuda = (c_prov == "CUDAExecutionProvider" or v_prov == "CUDAExecutionProvider")
+    onnx_cuda = c_prov == "CUDAExecutionProvider" or v_prov == "CUDAExecutionProvider"
 
     lines = [
         "========== Aegis AI — inference device (this process) ==========",
@@ -295,9 +316,7 @@ def _log_aegis_device_banner(crowd_sess, violence_sess) -> None:
     if onnx_cuda:
         lines.append("  >>> ONNX: USING GPU (CUDAExecutionProvider) <<<")
     else:
-        lines.append(
-            "  >>> ONNX: USING CPU <<<  (pip install onnxruntime-gpu + CUDA for GPU)"
-        )
+        lines.append("  >>> ONNX: USING CPU <<<  (pip install onnxruntime-gpu + CUDA for GPU)")
 
     if torch.cuda.is_available():
         try:
@@ -305,12 +324,10 @@ def _log_aegis_device_banner(crowd_sess, violence_sess) -> None:
         except Exception:
             gpu_name = "device 0"
         if getattr(settings, "TORCH_PREFER_GPU", True):
-            lines.append(
-                f"  >>> PyTorch: CUDA available — .pt YOLO can use GPU ({gpu_name}) <<<"
-            )
+            lines.append(f"  >>> PyTorch: CUDA available — .pt YOLO can use GPU ({gpu_name}) <<<")
         else:
             lines.append(
-                f"  PyTorch: CUDA present but TORCH_PREFER_GPU=false — .pt YOLO stays on CPU"
+                "  PyTorch: CUDA present but TORCH_PREFER_GPU=false — .pt YOLO stays on CPU"
             )
     else:
         lines.append("  PyTorch: no CUDA — .pt YOLO runs on CPU")
@@ -357,33 +374,35 @@ class SANet(nn.Module):
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
         )
-        self.aspp = nn.ModuleDict({
-            "b0": nn.Sequential(
-                nn.Conv2d(256, 256, 1, bias=False),
-                nn.BatchNorm2d(256),
-            ),
-            "b1": nn.Sequential(
-                nn.Conv2d(256, 256, 3, padding=6, dilation=6, bias=False),
-                nn.BatchNorm2d(256),
-            ),
-            "b2": nn.Sequential(
-                nn.Conv2d(256, 256, 3, padding=12, dilation=12, bias=False),
-                nn.BatchNorm2d(256),
-            ),
-            "b3": nn.Sequential(
-                nn.Conv2d(256, 256, 3, padding=18, dilation=18, bias=False),
-                nn.BatchNorm2d(256),
-            ),
-            "gap": nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Conv2d(256, 256, 1, bias=False),
-                nn.BatchNorm2d(256),
-            ),
-            "proj": nn.Sequential(
-                nn.Conv2d(1280, 256, 1, bias=False),
-                nn.BatchNorm2d(256),
-            ),
-        })
+        self.aspp = nn.ModuleDict(
+            {
+                "b0": nn.Sequential(
+                    nn.Conv2d(256, 256, 1, bias=False),
+                    nn.BatchNorm2d(256),
+                ),
+                "b1": nn.Sequential(
+                    nn.Conv2d(256, 256, 3, padding=6, dilation=6, bias=False),
+                    nn.BatchNorm2d(256),
+                ),
+                "b2": nn.Sequential(
+                    nn.Conv2d(256, 256, 3, padding=12, dilation=12, bias=False),
+                    nn.BatchNorm2d(256),
+                ),
+                "b3": nn.Sequential(
+                    nn.Conv2d(256, 256, 3, padding=18, dilation=18, bias=False),
+                    nn.BatchNorm2d(256),
+                ),
+                "gap": nn.Sequential(
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Conv2d(256, 256, 1, bias=False),
+                    nn.BatchNorm2d(256),
+                ),
+                "proj": nn.Sequential(
+                    nn.Conv2d(1280, 256, 1, bias=False),
+                    nn.BatchNorm2d(256),
+                ),
+            }
+        )
         self.density_head = nn.Sequential(
             nn.Conv2d(256, 128, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -399,9 +418,7 @@ class SANet(nn.Module):
         b2 = self.aspp["b2"](x)
         b3 = self.aspp["b3"](x)
         gap = self.aspp["gap"](x)
-        gap = nn.functional.interpolate(
-            gap, size=x.shape[2:], mode="bilinear", align_corners=False
-        )
+        gap = nn.functional.interpolate(gap, size=x.shape[2:], mode="bilinear", align_corners=False)
         x = torch.cat([b0, b1, b2, b3, gap], dim=1)
         x = self.aspp["proj"](x)
         return self.density_head(x)
@@ -415,30 +432,34 @@ class DetectionService:
         self.abandoned_threshold = settings.ABANDONED_OBJECT_THRESHOLD_SECONDS
 
         # Model references (populated by _load_models)
-        self.weapon_model = None       # YOLOv8 — Bags / Box / Weapons
+        self.weapon_model = None  # YOLOv8 — Bags / Box / Weapons
         # When weapon model is loaded from .onnx (fixed input), cap predict imgsz (see ONNX_YOLO_IMGSZ)
         self._weapon_onnx_imgsz_cap: Optional[int] = None
-        self._weapon_on_cuda: bool = False   # True when .pt model moved to GPU (enables FP16)
-        self.face_model = None         # YOLOv8 — covered / uncovered
-        self._face_on_cuda: bool = False     # True when .pt model moved to GPU (enables FP16)
-        self.crowd_model = None        # CSRNet / SANet (or "onnx" sentinel when using ONNX)
-        self.crowd_onnx_session = None # ONNX Runtime session for crowd density
-        self._crowd_onnx_input_name: Optional[str] = None  # first ONNX input name (export may differ from "input")
+        self._weapon_on_cuda: bool = False  # True when .pt model moved to GPU (enables FP16)
+        self.face_model = None  # YOLOv8 — covered / uncovered
+        self._face_on_cuda: bool = False  # True when .pt model moved to GPU (enables FP16)
+        self.crowd_model = None  # CSRNet / SANet (or "onnx" sentinel when using ONNX)
+        self.crowd_onnx_session = None  # ONNX Runtime session for crowd density
+        self._crowd_onnx_input_name: Optional[str] = (
+            None  # first ONNX input name (export may differ from "input")
+        )
         self._crowd_arch: str = "csrnet"
         self._crowd_density_scale: Optional[float] = None
-        self._crowd_calib_ratio_samples: List[float] = []  # median over N frames for stable scale
+        self._crowd_calib_ratio_samples: list[float] = []  # median over N frames for stable scale
         self._crowd_calibration_yolo = None  # YOLOv8n for SANet auto-calibration
         self._crowd_cal_yolo_attempts = 0  # max 2 tries (startup + first crowd frame)
         self._crowd_calib_lock = threading.Lock()
         self._crowd_skip_counter = 0
-        self._last_crowd_result: Optional[Dict[str, Any]] = None
-        self._crowd_future = None  # async crowd task (non-blocking collection in detect_all_parallel)
-        self.pose_model = None         # MediaPipe Pose
+        self._last_crowd_result: Optional[dict[str, Any]] = None
+        self._crowd_future = (
+            None  # async crowd task (non-blocking collection in detect_all_parallel)
+        )
+        self.pose_model = None  # MediaPipe Pose
         self.mp_pose = None
         self.violence_onnx_session = None  # Conv3D violence classifier (ONNX)
         self._violence_onnx_input_name: Optional[str] = None
         self.violence_pt_model = None  # Conv3D when ORT missing (never use pose_model for this)
-        self.bg_subtractor = None      # MOG2
+        self.bg_subtractor = None  # MOG2
 
         # Thread pool for parallel model inference (3 = YOLO + CSRNet + MediaPipe)
         self._inference_pool = ThreadPoolExecutor(max_workers=3)
@@ -508,7 +529,9 @@ class DetectionService:
         try:
             model = YOLO(str(pt_path))
             on_cuda = _try_move_yolo_to_cuda(model, model_name)
-            logger.info("%s loaded from PyTorch: %s — classes: %s", model_name, pt_path, model.names)
+            logger.info(
+                "%s loaded from PyTorch: %s — classes: %s", model_name, pt_path, model.names
+            )
             return model, None, on_cuda
         except Exception as e:
             logger.error("Failed to load %s: %s", model_name, e)
@@ -620,16 +643,14 @@ class DetectionService:
         dummy = torch.randn(1, 3, 384, 512)
         tmp = out_path.with_suffix(".tmp.onnx")
         try:
-            export_kw: Dict[str, Any] = {
+            export_kw: dict[str, Any] = {
                 "opset_version": 17,
                 "input_names": ["input"],
                 "output_names": ["density_map"],
                 "dynamic_axes": {"input": {2: "height", 3: "width"}},
             }
             try:
-                torch.onnx.export(
-                    pt_model, dummy, str(tmp), dynamo=False, **export_kw
-                )
+                torch.onnx.export(pt_model, dummy, str(tmp), dynamo=False, **export_kw)
             except TypeError:
                 torch.onnx.export(pt_model, dummy, str(tmp), **export_kw)
             tmp.replace(out_path)
@@ -716,9 +737,7 @@ class DetectionService:
         if self._crowd_cal_yolo_attempts >= 2:
             return
         self._crowd_cal_yolo_attempts += 1
-        cal_spec = getattr(
-            settings, "CROWD_CALIBRATION_YOLO_PATH", "./models/yolov8n.pt"
-        ).strip()
+        cal_spec = getattr(settings, "CROWD_CALIBRATION_YOLO_PATH", "./models/yolov8n.pt").strip()
         cal_path = Path(cal_spec)
         if cal_path.is_file():
             load_target = str(cal_path.resolve())
@@ -755,8 +774,8 @@ class DetectionService:
         # --- 1. YOLOv8 weapon / object model (Bags, Box, Weapons) ---
         weapon_path = Path(settings.MODEL_PATH)
         if weapon_path.exists():
-            self.weapon_model, self._weapon_onnx_imgsz_cap, self._weapon_on_cuda = self._load_yolo_onnx(
-                weapon_path, "Weapon"
+            self.weapon_model, self._weapon_onnx_imgsz_cap, self._weapon_on_cuda = (
+                self._load_yolo_onnx(weapon_path, "Weapon")
             )
         else:
             logger.warning("Weapon model not found at %s — weapon detection disabled", weapon_path)
@@ -777,7 +796,9 @@ class DetectionService:
             logger.warning("Crowd model not found at %s — crowd density disabled", crowd_path)
 
         # --- 4. Conv3D Violence classifier (v2: violence_model_v2.pt → auto .onnx) ---
-        violence_pt_path = Path(getattr(settings, "VIOLENCE_MODEL_PT_PATH", "./models/violence_model_v2.pt"))
+        violence_pt_path = Path(
+            getattr(settings, "VIOLENCE_MODEL_PT_PATH", "./models/violence_model_v2.pt")
+        )
         onnx_spec = getattr(settings, "VIOLENCE_MODEL_ONNX_PATH", None)
         violence_onnx_path = (
             Path(onnx_spec)
@@ -796,16 +817,14 @@ class DetectionService:
             vc_module.eval()
             vc_cpu = vc_module.cpu()
             dummy = torch.randn(1, 3, 16, 64, 64)
-            export_kw: Dict[str, Any] = {
+            export_kw: dict[str, Any] = {
                 "opset_version": 18,
                 "input_names": ["video_clip"],
                 "output_names": ["prediction"],
                 "dynamic_axes": {"video_clip": {0: "batch"}},
             }
             try:
-                torch.onnx.export(
-                    vc_cpu, dummy, str(out_path), dynamo=False, **export_kw
-                )
+                torch.onnx.export(vc_cpu, dummy, str(out_path), dynamo=False, **export_kw)
             except TypeError:
                 torch.onnx.export(vc_cpu, dummy, str(out_path), **export_kw)
             _bind_violence_onnx_session(_make_ort_session(out_path))
@@ -853,10 +872,13 @@ class DetectionService:
         # Also try MediaPipe as supplementary (optional)
         try:
             import mediapipe as mp
+
             self.mp_pose = mp.solutions.pose
             self.pose_model = self.mp_pose.Pose(
-                static_image_mode=False, model_complexity=0,
-                min_detection_confidence=0.5, min_tracking_confidence=0.5,
+                static_image_mode=False,
+                model_complexity=0,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
             )
             logger.info("MediaPipe Pose also loaded (supplementary)")
         except ImportError:
@@ -896,9 +918,7 @@ class DetectionService:
             return False
 
         # Structural similarity via normalized correlation
-        score = cv2.matchTemplate(
-            self._prev_frame_gray, small, cv2.TM_CCORR_NORMED
-        )[0][0]
+        score = cv2.matchTemplate(self._prev_frame_gray, small, cv2.TM_CCORR_NORMED)[0][0]
 
         self._prev_frame_gray = small
         return score > self.similarity_threshold
@@ -908,7 +928,7 @@ class DetectionService:
     # ==================================================================
     def run_yolo_shared(
         self, frame: np.ndarray, conf: float = 0.4, imgsz: Optional[int] = None
-    ) -> Dict[str, list]:
+    ) -> dict[str, list]:
         """
         Run the weapon YOLO model once and split results into categories.
         Returns {"weapons": [...], "bags_boxes": [...], "all_boxes": [...]}
@@ -932,7 +952,10 @@ class DetectionService:
         if self._weapon_onnx_imgsz_cap is not None:
             infer_sz = min(infer_sz, self._weapon_onnx_imgsz_cap)
         results = self.weapon_model(
-            frame, conf=conf, imgsz=infer_sz, verbose=False,
+            frame,
+            conf=conf,
+            imgsz=infer_sz,
+            verbose=False,
             half=self._weapon_on_cuda,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
         )
 
@@ -1000,12 +1023,12 @@ class DetectionService:
     def detect_all_parallel(
         self,
         frame: np.ndarray,
-        previous_frames: List[np.ndarray],
+        previous_frames: list[np.ndarray],
         frame_timestamp: datetime,
-        object_history: Dict[str, List[datetime]],
-        enabled_modules: Dict[str, Dict[str, Any]],
+        object_history: dict[str, list[datetime]],
+        enabled_modules: dict[str, dict[str, Any]],
         full_frame: Optional[np.ndarray] = None,
-    ) -> List[tuple]:
+    ) -> list[tuple]:
         """
         Run all enabled detection modules in parallel.
         Args:
@@ -1013,7 +1036,7 @@ class DetectionService:
             full_frame: original resolution frame for CSRNet (needs full res for accurate count)
         Returns list of (DetectionType, detection_dict) tuples.
         """
-        all_results: List[tuple] = []
+        all_results: list[tuple] = []
         futures = {}
 
         # Skip near-duplicate frames for speed — but not when weapon/abandoned YOLO runs:
@@ -1023,13 +1046,16 @@ class DetectionService:
         need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
         similar = self.is_frame_similar(frame)
         # Violence Conv3D needs temporal context; skipping similar frames would starve the clip.
-        if similar and not need_yolo and "crowd_density" not in enabled_modules and "violence" not in enabled_modules:
+        if (
+            similar
+            and not need_yolo
+            and "crowd_density" not in enabled_modules
+            and "violence" not in enabled_modules
+        ):
             return []
 
         weapon_min = enabled_modules.get("weapon", {}).get("min_confidence")
-        weapon_conf = (
-            float(weapon_min) if weapon_min is not None else self.confidence_threshold
-        )
+        weapon_conf = float(weapon_min) if weapon_min is not None else self.confidence_threshold
 
         # Ultralytics `conf` drops boxes below this before post-processing. It must be
         # <= company min_confidence (e.g. 0.2 vs hardcoded 0.25 loses valid boxes).
@@ -1064,13 +1090,9 @@ class DetectionService:
             # Pick up async result from the previous analyzed frame (if it finished).
             self._finalize_async_crowd_result(wait_for_first=False)
 
-            crowd_every_n = max(
-                1, int(getattr(settings, "CROWD_EVERY_N_ANALYSIS_FRAMES", 1))
-            )
+            crowd_every_n = max(1, int(getattr(settings, "CROWD_EVERY_N_ANALYSIS_FRAMES", 1)))
             self._crowd_skip_counter = (self._crowd_skip_counter + 1) % crowd_every_n
-            should_run_crowd = (
-                self._crowd_skip_counter == 0 or self._last_crowd_result is None
-            )
+            should_run_crowd = self._crowd_skip_counter == 0 or self._last_crowd_result is None
 
             if should_run_crowd and self._crowd_future is None:
                 # Submit crowd model asynchronously; do not block frame loop.
@@ -1124,9 +1146,7 @@ class DetectionService:
                         all_results.append((DetectionType.VIOLENCE, result))
             except FuturesTimeoutError:
                 future.cancel()
-                logger.warning(
-                    "Module %s timed out after %ss", module, timeout_s
-                )
+                logger.warning("Module %s timed out after %ss", module, timeout_s)
             except Exception as e:
                 logger.warning("Module %s failed: %s", module, e)
 
@@ -1136,28 +1156,22 @@ class DetectionService:
     # 1. Weapon detection — extract from shared YOLO results
     # ==================================================================
     def _extract_weapons(
-        self, yolo_results: Dict[str, list], weapon_conf: float
-    ) -> List[Dict[str, Any]]:
+        self, yolo_results: dict[str, list], weapon_conf: float
+    ) -> list[dict[str, Any]]:
         """Extract weapon detections from shared YOLO results."""
-        return [
-            det
-            for det in yolo_results["weapons"]
-            if det["confidence"] >= weapon_conf
-        ]
+        return [det for det in yolo_results["weapons"] if det["confidence"] >= weapon_conf]
 
     def detect_weapons(
         self,
         frame: np.ndarray,
         frame_timestamp: datetime,
         min_confidence: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Detect weapons in a frame (standalone, for backward compat)."""
         if self.weapon_model is None:
             return []
         weapon_conf = (
-            float(min_confidence)
-            if min_confidence is not None
-            else self.confidence_threshold
+            float(min_confidence) if min_confidence is not None else self.confidence_threshold
         )
         yolo_conf = max(0.01, min(weapon_conf, 0.25))
         results = self.run_yolo_shared(frame, conf=yolo_conf)
@@ -1169,9 +1183,9 @@ class DetectionService:
     def detect_violence(
         self,
         frame: np.ndarray,
-        previous_frames: List[np.ndarray],
+        previous_frames: list[np.ndarray],
         frame_timestamp: datetime,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Detect violent behaviour using trained Conv3D classifier.
         Uses 16 frames (current + previous) resized to 64x64.
@@ -1210,9 +1224,8 @@ class DetectionService:
                     outputs = self.violence_onnx_session.run(None, {in_name: clip})
                     logits = outputs[0][0]  # [non_violent, violent]
                 else:
-                    use_cuda = (
-                        torch.cuda.is_available()
-                        and getattr(settings, "TORCH_PREFER_GPU", True)
+                    use_cuda = torch.cuda.is_available() and getattr(
+                        settings, "TORCH_PREFER_GPU", True
                     )
                     dev = torch.device("cuda" if use_cuda else "cpu")
                     self.violence_pt_model.to(dev)
@@ -1242,9 +1255,15 @@ class DetectionService:
             prev_gray = cv2.cvtColor(previous_frames[-1], cv2.COLOR_BGR2GRAY)
             curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             flow = cv2.calcOpticalFlowFarneback(
-                prev_gray, curr_gray, None,
-                pyr_scale=0.5, levels=2, winsize=11,
-                iterations=2, poly_n=5, poly_sigma=1.1,
+                prev_gray,
+                curr_gray,
+                None,
+                pyr_scale=0.5,
+                levels=2,
+                winsize=11,
+                iterations=2,
+                poly_n=5,
+                poly_sigma=1.1,
                 flags=0,
             )
             mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
@@ -1265,13 +1284,13 @@ class DetectionService:
     # ==================================================================
     def _extract_abandoned(
         self,
-        yolo_results: Dict[str, list],
+        yolo_results: dict[str, list],
         frame: np.ndarray,
         frame_timestamp: datetime,
-        object_history: Dict[str, List[datetime]],
-    ) -> List[Dict[str, Any]]:
+        object_history: dict[str, list[datetime]],
+    ) -> list[dict[str, Any]]:
         """Extract abandoned objects from shared YOLO results (Bags/Box)."""
-        detections: List[Dict[str, Any]] = []
+        detections: list[dict[str, Any]] = []
         h, w = frame.shape[:2]
 
         for det in yolo_results["bags_boxes"]:
@@ -1289,12 +1308,14 @@ class DetectionService:
             duration = (frame_timestamp - first_seen).total_seconds()
 
             if duration >= self.abandoned_threshold:
-                detections.append({
-                    "bbox": det["bbox"],
-                    "confidence": min(1.0, duration / (self.abandoned_threshold * 2)),
-                    "class": f"abandoned_{cls_name.lower()}",
-                    "duration_seconds": duration,
-                })
+                detections.append(
+                    {
+                        "bbox": det["bbox"],
+                        "confidence": min(1.0, duration / (self.abandoned_threshold * 2)),
+                        "class": f"abandoned_{cls_name.lower()}",
+                        "duration_seconds": duration,
+                    }
+                )
 
         return detections
 
@@ -1303,11 +1324,11 @@ class DetectionService:
         frame: np.ndarray,
         background: Optional[np.ndarray],
         frame_timestamp: datetime,
-        object_history: Dict[str, List[datetime]],
-    ) -> List[Dict[str, Any]]:
+        object_history: dict[str, list[datetime]],
+    ) -> list[dict[str, Any]]:
         """Detect abandoned objects (standalone, for backward compat)."""
         h, w = frame.shape[:2]
-        detections: List[Dict[str, Any]] = []
+        detections: list[dict[str, Any]] = []
 
         if self.weapon_model is not None:
             yolo_results = self.run_yolo_shared(frame)
@@ -1335,12 +1356,14 @@ class DetectionService:
             duration = (frame_timestamp - first_seen).total_seconds()
 
             if duration >= self.abandoned_threshold:
-                detections.append({
-                    "bbox": [x / w, y / h, cw / w, ch / h],
-                    "confidence": min(1.0, duration / (self.abandoned_threshold * 2)),
-                    "class": "abandoned_object",
-                    "duration_seconds": duration,
-                })
+                detections.append(
+                    {
+                        "bbox": [x / w, y / h, cw / w, ch / h],
+                        "confidence": min(1.0, duration / (self.abandoned_threshold * 2)),
+                        "class": "abandoned_object",
+                        "duration_seconds": duration,
+                    }
+                )
 
         return detections
 
@@ -1351,17 +1374,19 @@ class DetectionService:
         self,
         frame: np.ndarray,
         frame_timestamp: datetime,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Detect faces and classify as covered or uncovered."""
         if self.face_model is None:
             return []
 
         h, w = frame.shape[:2]
         results = self.face_model(
-            frame, conf=self.confidence_threshold, verbose=False,
+            frame,
+            conf=self.confidence_threshold,
+            verbose=False,
             half=self._face_on_cuda,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
         )
-        detections: List[Dict[str, Any]] = []
+        detections: list[dict[str, Any]] = []
 
         for result in results:
             for box in result.boxes:
@@ -1370,12 +1395,14 @@ class DetectionService:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 is_masked = cls_name.lower() == "covered"
 
-                detections.append({
-                    "bbox": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
-                    "confidence": float(box.conf[0]),
-                    "class": cls_name,
-                    "is_masked": is_masked,
-                })
+                detections.append(
+                    {
+                        "bbox": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
+                        "confidence": float(box.conf[0]),
+                        "class": cls_name,
+                        "is_masked": is_masked,
+                    }
+                )
 
         return detections
 
@@ -1405,7 +1432,7 @@ class DetectionService:
         self,
         frame: np.ndarray,
         frame_timestamp: datetime,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """SANet: RGB/255; ONNX on CPU. Auto-calibration uses YOLO on the same resize as SANet unless full-frame."""
         h0, w0 = frame.shape[:2]
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -1429,9 +1456,7 @@ class DetectionService:
         density_sum: float
         inp_name = self._crowd_onnx_input_name or "input"
         if self.crowd_onnx_session is not None:
-            outputs = self.crowd_onnx_session.run(
-                None, {inp_name: input_tensor.numpy()}
-            )
+            outputs = self.crowd_onnx_session.run(None, {inp_name: input_tensor.numpy()})
             density_map = outputs[0]
             density_sum = float(np.sum(density_map))
         else:
@@ -1452,9 +1477,12 @@ class DetectionService:
         sum_ok_notebook = float(density_sum) > 0 and np.isfinite(density_sum)
 
         cal_final: Optional[float] = None
-        cal_interim: List[float] = []
+        cal_interim: list[float] = []
         with self._crowd_calib_lock:
-            if getattr(settings, "CROWD_AUTO_CALIBRATE", True) and self._crowd_density_scale is None:
+            if (
+                getattr(settings, "CROWD_AUTO_CALIBRATE", True)
+                and self._crowd_density_scale is None
+            ):
                 # ── Notebook script: yolo(frame), cls==0, SCALE = persons / raw_sum (same resize as SANet) ──
                 if notebook_cal and sum_ok_notebook:
                     if expected_ct is not None and int(expected_ct) > 0:
@@ -1467,17 +1495,13 @@ class DetectionService:
                         )
                     elif self._crowd_calibration_yolo is not None:
                         try:
-                            results = self._crowd_calibration_yolo(
-                                yolo_cal_frame, verbose=False
-                            )
+                            results = self._crowd_calibration_yolo(yolo_cal_frame, verbose=False)
                             person_count_yolo = self._yolo_coco_person_count(results)
                         except Exception as e:
                             logger.exception("SANet calibration YOLO inference failed: %s", e)
                             person_count_yolo = 0
                         self._crowd_density_scale = (
-                            person_count_yolo / float(density_sum)
-                            if density_sum > 0
-                            else 1.0
+                            person_count_yolo / float(density_sum) if density_sum > 0 else 1.0
                         )
                         logger.info(
                             "SANet auto-calibration: YOLO persons=%d raw_sum=%.4f scale=%.8f "
@@ -1503,7 +1527,9 @@ class DetectionService:
                                 conf=cal_conf,
                                 imgsz=cal_imgsz,
                             )
-                            person_count_yolo = len(results[0].boxes) if results[0].boxes is not None else 0
+                            person_count_yolo = (
+                                len(results[0].boxes) if results[0].boxes is not None else 0
+                            )
                         except Exception as e:
                             logger.exception("SANet multi-frame calibration YOLO failed: %s", e)
                             person_count_yolo = 0
@@ -1512,7 +1538,9 @@ class DetectionService:
                         self._crowd_calib_ratio_samples.append(float(ratio))
                         if len(self._crowd_calib_ratio_samples) >= n_cal_frames:
                             self._crowd_density_scale = float(
-                                np.median(np.array(self._crowd_calib_ratio_samples, dtype=np.float64))
+                                np.median(
+                                    np.array(self._crowd_calib_ratio_samples, dtype=np.float64)
+                                )
                             )
                             logger.info(
                                 "SANet calibration (median n=%d): scale=%.8f samples=%s",
@@ -1538,21 +1566,23 @@ class DetectionService:
         # visible as a high peak_ratio AND high coefficient-of-variation.
         # Reject the result when both are below threshold → avoids false positives
         # on floors, walls, desks, etc.
-        map_max  = float(raw_density_map.max())
+        map_max = float(raw_density_map.max())
         map_mean = float(raw_density_map.mean()) if raw_density_map.size > 0 else 0.0
-        map_std  = float(raw_density_map.std())  if raw_density_map.size > 0 else 0.0
+        map_std = float(raw_density_map.std()) if raw_density_map.size > 0 else 0.0
 
-        peak_ratio = map_max  / (map_mean + 1e-8)
-        cv_ratio   = map_std  / (map_mean + 1e-8)
+        peak_ratio = map_max / (map_mean + 1e-8)
+        cv_ratio = map_std / (map_mean + 1e-8)
 
         sanet_peak_thresh = float(getattr(settings, "CROWD_SANET_PEAK_RATIO_MIN", 3.0))
-        sanet_cv_thresh   = float(getattr(settings, "CROWD_SANET_CV_RATIO_MIN",   1.0))
+        sanet_cv_thresh = float(getattr(settings, "CROWD_SANET_CV_RATIO_MIN", 1.0))
         is_noise = peak_ratio < sanet_peak_thresh and cv_ratio < sanet_cv_thresh
 
         if getattr(settings, "CROWD_DEBUG_LOG", False):
             logger.info(
                 "[sanet filter] peak_ratio=%.2f cv_ratio=%.2f raw_sum=%.4f → %s",
-                peak_ratio, cv_ratio, density_sum,
+                peak_ratio,
+                cv_ratio,
+                density_sum,
                 "REJECTED (noise/surface)" if is_noise else "ACCEPTED",
             )
 
@@ -1564,9 +1594,9 @@ class DetectionService:
                 "density_map_normalized": np.zeros((h0, w0), dtype=np.uint8),
             }
 
-        raw_count    = max(0.0, density_sum * cal_scale)
+        raw_count = max(0.0, density_sum * cal_scale)
         person_count = max(0, int(round(raw_count)))
-        density      = min(1.0, person_count / 50.0)
+        density = min(1.0, person_count / 50.0)
 
         # Heatmap matches SANet notebook: resize density → full frame, clip, / max → uint8 (then JET in video_service)
         hm = cv2.resize(
@@ -1591,7 +1621,7 @@ class DetectionService:
         self,
         frame: np.ndarray,
         frame_timestamp: datetime,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Estimate crowd count and density using CSRNet, SANet, or HOG fallback.
 
@@ -1600,9 +1630,7 @@ class DetectionService:
         if self.crowd_model is not None:
             try:
                 if getattr(self, "_crowd_arch", "csrnet") == "sanet":
-                    return self._calculate_sanet_crowd_density(
-                        frame, frame_timestamp
-                    )
+                    return self._calculate_sanet_crowd_density(frame, frame_timestamp)
                 # Preprocessing must match training pipeline exactly
                 # (see E:\CSRNet-pytorch\video_inference.py — preprocess_frame)
                 from PIL import Image
@@ -1615,13 +1643,15 @@ class DetectionService:
                 cw, ch = max_side, int(384 * max_side / 512)
                 pil_img = pil_img.resize((cw, ch), Image.BILINEAR)
 
-                transform = transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(
-                        mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225],
-                    ),
-                ])
+                transform = transforms.Compose(
+                    [
+                        transforms.ToTensor(),
+                        transforms.Normalize(
+                            mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225],
+                        ),
+                    ]
+                )
                 input_tensor = transform(pil_img).unsqueeze(0)  # (1, 3, ch, cw)
                 input_array = input_tensor.numpy()
 
@@ -1665,28 +1695,41 @@ class DetectionService:
                 logger.info(
                     "CSRNet raw=%.1f (scaled x%.1f), peak_ratio=%.1f, cv=%.1f, "
                     "max=%.4f, mean=%.4f",
-                    raw_count, scale_factor, peak_ratio, cv_ratio,
-                    map_max, map_mean,
+                    raw_count,
+                    scale_factor,
+                    peak_ratio,
+                    cv_ratio,
+                    map_max,
+                    map_mean,
                 )
 
                 # Reject only if density map is very uniform (texture noise)
                 # Real crowds always have peaks (peak_ratio > 3) and variance (cv > 1)
-                is_fake = (peak_ratio < 3.0 and cv_ratio < 1.0)
+                is_fake = peak_ratio < 3.0 and cv_ratio < 1.0
 
                 if is_fake:
-                    logger.info("CSRNet REJECTED as noise (peak=%.1f, cv=%.1f)", peak_ratio, cv_ratio)
+                    logger.info(
+                        "CSRNet REJECTED as noise (peak=%.1f, cv=%.1f)", peak_ratio, cv_ratio
+                    )
                     person_count = 0
                     density = 0.0
                 else:
                     person_count = max(0, int(raw_count))
                     density = min(1.0, person_count / 50.0)
-                    logger.info("CSRNet ACCEPTED: count=%d, density=%.2f, scale=%.1fx",
-                                person_count, density, scale_factor)
+                    logger.info(
+                        "CSRNet ACCEPTED: count=%d, density=%.2f, scale=%.1fx",
+                        person_count,
+                        density,
+                        scale_factor,
+                    )
 
                 # Normalize density map for heatmap visualization
                 if raw_density_map.max() > raw_density_map.min():
-                    density_normalized = ((raw_density_map - raw_density_map.min()) /
-                                         (raw_density_map.max() - raw_density_map.min()) * 255).astype(np.uint8)
+                    density_normalized = (
+                        (raw_density_map - raw_density_map.min())
+                        / (raw_density_map.max() - raw_density_map.min())
+                        * 255
+                    ).astype(np.uint8)
                 else:
                     density_normalized = np.zeros_like(raw_density_map, dtype=np.uint8)
 
@@ -1720,19 +1763,23 @@ class DetectionService:
 
     # Default thresholds per detection type: (critical, high, medium)
     DEFAULT_THRESHOLDS = {
-        DetectionType.WEAPON:           (0.9, 0.7, 0.5),
-        DetectionType.VIOLENCE:         (0.8, 0.65, 0.5),
-        DetectionType.ABANDONED_OBJECT: (None, 0.8, 0.5),   # No CRITICAL for abandoned
-        DetectionType.MASK_FACE:        (None, None, 0.9),   # Max MEDIUM for face/mask
-        DetectionType.CROWD_DENSITY:    (None, 0.9, 0.7),    # Uses count/scaled or density (see classify_threat_level)
+        DetectionType.WEAPON: (0.9, 0.7, 0.5),
+        DetectionType.VIOLENCE: (0.8, 0.65, 0.5),
+        DetectionType.ABANDONED_OBJECT: (None, 0.8, 0.5),  # No CRITICAL for abandoned
+        DetectionType.MASK_FACE: (None, None, 0.9),  # Max MEDIUM for face/mask
+        DetectionType.CROWD_DENSITY: (
+            None,
+            0.9,
+            0.7,
+        ),  # Uses count/scaled or density (see classify_threat_level)
     }
 
     def classify_threat_level(
         self,
         detection_type: DetectionType,
         confidence: float,
-        metadata: Optional[Dict[str, Any]] = None,
-        company_thresholds: Optional[Dict[str, Optional[float]]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        company_thresholds: Optional[dict[str, Optional[float]]] = None,
     ) -> ThreatLevel:
         """Classify threat level based on detection type and confidence."""
         value = confidence
@@ -1761,6 +1808,7 @@ class DetectionService:
         # - Absolute people counts (e.g. 20 / 100 / 1000)
         # - Legacy 0..1 normalized values (converted by CROWD_THREAT_MAX_PEOPLE_SCALE)
         if detection_type == DetectionType.CROWD_DENSITY and use_people_count:
+
             def to_people_threshold(t: Optional[float]) -> Optional[float]:
                 if t is None:
                     return None
@@ -1790,18 +1838,24 @@ class DetectionService:
         self,
         db,
         company_id: Optional[int] = None,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """Return a dict of module_name → settings for modules that are active."""
-        from app.models.detection_settings import GlobalModuleSettings, CompanyDetectionSettings
+        from app.models.detection_settings import CompanyDetectionSettings, GlobalModuleSettings
 
-        global_settings = {s.module_name: s.is_enabled for s in db.query(GlobalModuleSettings).all()}
+        global_settings = {
+            s.module_name: s.is_enabled for s in db.query(GlobalModuleSettings).all()
+        }
 
         company_settings = {}
         if company_id:
-            for cs in db.query(CompanyDetectionSettings).filter(CompanyDetectionSettings.company_id == company_id).all():
+            for cs in (
+                db.query(CompanyDetectionSettings)
+                .filter(CompanyDetectionSettings.company_id == company_id)
+                .all()
+            ):
                 company_settings[cs.module_name] = cs
 
-        enabled: Dict[str, Dict[str, Any]] = {}
+        enabled: dict[str, dict[str, Any]] = {}
         for dt in DetectionType:
             module = dt.value
 
@@ -1812,7 +1866,7 @@ class DetectionService:
             if cs and not cs.is_enabled:
                 continue
 
-            thresholds: Dict[str, Any] = {}
+            thresholds: dict[str, Any] = {}
             if cs:
                 thresholds["critical_threshold"] = cs.critical_threshold
                 thresholds["high_threshold"] = cs.high_threshold

@@ -26,9 +26,10 @@ os.environ.setdefault("CROWD_MODEL_PATH", "./models/fake_crowd.onnx")
 os.environ.setdefault("VIOLENCE_MODEL_PT_PATH", "./models/fake_violence.pt")
 
 # ── 2. Import app.database and replace the engine before app.main loads ─────
-import app.database as _appdb  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
+
+import app.database as _appdb  # noqa: E402
 
 _TEST_DB_URL = "sqlite:///./test_aegis.db"
 _test_engine = create_engine(
@@ -42,18 +43,19 @@ _appdb.engine = _test_engine
 _appdb.SessionLocal = _TestSession
 
 # ── 3. Now it is safe to import the app ─────────────────────────────────────
+from datetime import datetime, timedelta  # noqa: E402
+
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from datetime import timedelta, datetime  # noqa: E402
 
-from app.main import app  # noqa: E402
+from app.core.security import create_access_token, get_password_hash  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
-from app.core.security import get_password_hash, create_access_token  # noqa: E402
-from app.models.user import User, Role  # noqa: E402
-from app.models.company import Company  # noqa: E402
-from app.models.camera import Camera  # noqa: E402
-from app.models.detection import Detection, DetectionType, ThreatLevel  # noqa: E402
+from app.main import app  # noqa: E402
 from app.models.alert import Alert, AlertStatus  # noqa: E402
+from app.models.camera import Camera  # noqa: E402
+from app.models.company import Company  # noqa: E402
+from app.models.detection import Detection, DetectionType, ThreatLevel  # noqa: E402
+from app.models.user import Role, User  # noqa: E402
 
 # ── 5. Override get_db dependency ────────────────────────────────────────────
 

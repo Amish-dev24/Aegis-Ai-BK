@@ -1,19 +1,22 @@
 """
 Audit log management endpoints.
 """
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.database import get_db
+
 from app.core.security import get_current_user
+from app.database import get_db
 from app.models.audit_log import AuditLog
-from app.models.user import User, Role
+from app.models.user import Role, User
 from app.schemas.audit_log import AuditLogResponse
 
 router = APIRouter(prefix="/audit-logs", tags=["audit-logs"])
 
 
-@router.get("", response_model=List[AuditLogResponse])
+@router.get("", response_model=list[AuditLogResponse])
 async def get_audit_logs(
     skip: int = 0,
     limit: int = 100,
@@ -22,7 +25,7 @@ async def get_audit_logs(
     resource_type: Optional[str] = None,
     company_id: Optional[int] = Query(None, description="Filter by company (aegis_admin only)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """
     Get audit logs.
@@ -37,7 +40,9 @@ async def get_audit_logs(
         if not current_user.company_id:
             query = query.filter(AuditLog.user_id == current_user.id)
         else:
-            query = query.join(User, AuditLog.user_id == User.id).filter(User.company_id == current_user.company_id)
+            query = query.join(User, AuditLog.user_id == User.id).filter(
+                User.company_id == current_user.company_id
+            )
             _user_joined = True
     elif company_id:
         # Aegis admin filtering by a specific company
@@ -59,19 +64,17 @@ async def get_audit_logs(
 
 @router.get("/{log_id}", response_model=AuditLogResponse)
 async def get_audit_log(
-    log_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    log_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Get a specific audit log entry."""
     query = db.query(AuditLog).filter(AuditLog.id == log_id)
-    
+
     if current_user.role != Role.AEGIS_ADMIN:
         if not current_user.company_id:
-             query = query.filter(AuditLog.user_id == current_user.id)
+            query = query.filter(AuditLog.user_id == current_user.id)
         else:
             query = query.join(User).filter(User.company_id == current_user.company_id)
-            
+
     log = query.first()
     if not log:
         raise HTTPException(status_code=404, detail="Audit log not found")

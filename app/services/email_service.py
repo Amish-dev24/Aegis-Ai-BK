@@ -1,23 +1,26 @@
 """
 Email service for sending security alerts.
 """
+
 try:
     import aiosmtplib
 except ImportError:
     aiosmtplib = None
 
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
-from typing import List, Optional
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
+from typing import Optional
+
 from jinja2 import Template
+
 from app.config import settings
 
 
 class EmailService:
     """Service for sending email notifications."""
-    
+
     def __init__(self):
         self.smtp_host = settings.SMTP_HOST
         self.smtp_port = settings.SMTP_PORT
@@ -25,25 +28,25 @@ class EmailService:
         self.smtp_password = settings.SMTP_PASSWORD
         self.from_email = settings.SMTP_FROM_EMAIL
         self.from_name = settings.SMTP_FROM_NAME
-    
+
     async def send_alert_email(
         self,
-        to_emails: List[str],
+        to_emails: list[str],
         subject: str,
         message: str,
         snapshot_path: Optional[str] = None,
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
     ) -> bool:
         """
         Send an alert email with optional snapshot attachment.
-        
+
         Args:
             to_emails: List of recipient email addresses
             subject: Email subject
             message: Email body text
             snapshot_path: Path to snapshot image to attach
             metadata: Additional metadata to include in email
-        
+
         Returns:
             True if sent successfully, False otherwise
         """
@@ -52,18 +55,20 @@ class EmailService:
             msg["From"] = f"{self.from_name} <{self.from_email}>"
             msg["To"] = ", ".join(to_emails)
             msg["Subject"] = subject
-            
+
             # Create HTML body
             html_body = self._create_alert_html(message, metadata)
             msg.attach(MIMEText(html_body, "html"))
-            
+
             # Attach snapshot if provided
             if snapshot_path and Path(snapshot_path).exists():
                 with open(snapshot_path, "rb") as f:
                     img = MIMEImage(f.read())
-                    img.add_header("Content-Disposition", "attachment", filename="alert_snapshot.jpg")
+                    img.add_header(
+                        "Content-Disposition", "attachment", filename="alert_snapshot.jpg"
+                    )
                     msg.attach(img)
-            
+
             # Send email
             if aiosmtplib is None:
                 print("Warning: aiosmtplib not installed. Email sending skipped.")
@@ -81,11 +86,11 @@ class EmailService:
                 start_tls=not use_implicit_tls,
             )
             return True
-        
+
         except Exception as e:
             print(f"Error sending email: {e}")
             return False
-    
+
     def _create_alert_html(self, message: str, metadata: Optional[dict]) -> str:
         """Create HTML email template."""
         template_str = """
@@ -125,4 +130,3 @@ class EmailService:
 
 
 email_service = EmailService()
-

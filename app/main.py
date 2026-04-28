@@ -1,16 +1,19 @@
 """
 Main FastAPI application entry point.
 """
+
 import logging
-from fastapi import FastAPI, Request, Response
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from contextlib import asynccontextmanager
-import uvicorn
-from app.config import settings
-from app.database import engine, Base
+
 from app.api.v1 import api_router
+from app.config import settings
+from app.database import Base, engine
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,7 @@ async def lifespan(app: FastAPI):
     # Reload completed video jobs from disk so results survive process restarts
     try:
         from app.api.v1.video_processing import load_jobs_from_disk
+
         load_jobs_from_disk()
     except Exception as e:
         logger.warning("Video job restore failed: %s", e)
@@ -36,6 +40,7 @@ async def lifespan(app: FastAPI):
         try:
             from app.database import SessionLocal
             from app.services.retention_service import run_retention_cleanup
+
             db = SessionLocal()
             result = run_retention_cleanup(db)
             logger.info("Startup retention cleanup: %s", result.get("message", "done"))
@@ -47,6 +52,7 @@ async def lifespan(app: FastAPI):
     # Shutdown: stop inference worker threads (avoids orphaned processes on reload / kill)
     try:
         from app.services.detection_service import detection_service
+
         detection_service._inference_pool.shutdown(wait=True)
     except Exception as e:
         logger.warning("Inference executor shutdown: %s", e)
@@ -78,7 +84,11 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 app.mount("/evidence", StaticFiles(directory=settings.EVIDENCE_DIR), name="evidence")
 
 # Serve processed videos directly as a deployment-friendly fallback.
-app.mount("/processed_videos", StaticFiles(directory=settings.PROCESSED_VIDEO_DIR), name="processed_videos")
+app.mount(
+    "/processed_videos",
+    StaticFiles(directory=settings.PROCESSED_VIDEO_DIR),
+    name="processed_videos",
+)
 
 
 @app.middleware("http")
@@ -96,11 +106,7 @@ async def add_cache_headers(request: Request, call_next):
 @app.get("/")
 async def root():
     """Root endpoint."""
-    return {
-        "message": "Aegis AI Surveillance Platform API",
-        "version": "1.0.0",
-        "docs": "/docs"
-    }
+    return {"message": "Aegis AI Surveillance Platform API", "version": "1.0.0", "docs": "/docs"}
 
 
 @app.get("/health")
@@ -127,6 +133,5 @@ if __name__ == "__main__":
         port=8000,
         reload=settings.DEBUG,
         ssl_keyfile=settings.SSL_KEY_PATH if settings.SSL_KEY_PATH else None,
-        ssl_certfile=settings.SSL_CERT_PATH if settings.SSL_CERT_PATH else None
+        ssl_certfile=settings.SSL_CERT_PATH if settings.SSL_CERT_PATH else None,
     )
-

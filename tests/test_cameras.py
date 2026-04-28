@@ -17,6 +17,7 @@ BASE = "/api/v1/cameras"
 
 # ── Create ────────────────────────────────────────────────────────────────────
 
+
 class TestCreateCamera:
     def test_officer_can_create(self, client, officer_headers):
         resp = client.post(
@@ -73,6 +74,7 @@ class TestCreateCamera:
 
 # ── List ──────────────────────────────────────────────────────────────────────
 
+
 class TestListCameras:
     def test_officer_sees_own_company_cameras(self, client, officer_headers, test_camera):
         resp = client.get(BASE, headers=officer_headers)
@@ -103,6 +105,7 @@ class TestListCameras:
 
 # ── Get by ID ─────────────────────────────────────────────────────────────────
 
+
 class TestGetCamera:
     def test_get_existing_camera(self, client, officer_headers, test_camera):
         resp = client.get(f"{BASE}/{test_camera.id}", headers=officer_headers)
@@ -120,6 +123,7 @@ class TestGetCamera:
 
 
 # ── Update ────────────────────────────────────────────────────────────────────
+
 
 class TestUpdateCamera:
     def test_officer_can_update(self, client, officer_headers, test_camera):
@@ -149,6 +153,7 @@ class TestUpdateCamera:
 
 
 # ── Delete ────────────────────────────────────────────────────────────────────
+
 
 class TestDeleteCamera:
     def test_officer_can_delete(self, client, officer_headers):

@@ -4,11 +4,13 @@ Data retention endpoints — manage automatic cleanup of old data.
 Section 9 of proposal: "Define retention period (e.g., 30-90 days)
 after which evidence is archived or deleted."
 """
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from app.database import get_db
+
 from app.config import settings
 from app.core.security import require_admin, require_aegis_admin
+from app.database import get_db
 from app.models.user import User
 from app.services.retention_service import run_retention_cleanup
 
@@ -48,10 +50,10 @@ async def purge_all_data(
     current_user: User = Depends(require_aegis_admin),
 ):
     """Delete ALL detections, evidence, alerts, and logs regardless of age. Aegis admin only."""
-    from app.models.alert_log import AlertLog
     from app.models.alert import Alert
-    from app.models.evidence import Evidence
+    from app.models.alert_log import AlertLog
     from app.models.detection import Detection
+    from app.models.evidence import Evidence
 
     logs = db.query(AlertLog).delete()
     alerts = db.query(Alert).delete()
@@ -66,5 +68,5 @@ async def purge_all_data(
             "evidence_deleted": evidence,
             "alerts_deleted": alerts,
             "alert_logs_deleted": logs,
-        }
+        },
     }

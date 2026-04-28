@@ -1,7 +1,9 @@
 """
 SMS service using Twilio for sending alert notifications.
 """
+
 import logging
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -9,6 +11,7 @@ logger = logging.getLogger(__name__)
 # Try to import Twilio
 try:
     from twilio.rest import Client as TwilioClient
+
     TWILIO_AVAILABLE = True
 except ImportError:
     TWILIO_AVAILABLE = False
@@ -58,8 +61,14 @@ def send_sms(to_number: str, message: str) -> bool:
         return False
 
 
-def send_alert_sms(to_number: str, detection_type: str, threat_level: str,
-                    confidence: float, camera_name: str, timestamp: str) -> bool:
+def send_alert_sms(
+    to_number: str,
+    detection_type: str,
+    threat_level: str,
+    confidence: float,
+    camera_name: str,
+    timestamp: str,
+) -> bool:
     """
     Send a formatted alert SMS.
     """

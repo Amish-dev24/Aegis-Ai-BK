@@ -2,17 +2,19 @@
 Analytics endpoints for dashboard visualizations.
 All endpoints respect multi-tenant isolation via company filtering.
 """
-from fastapi import Request, Query, APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
-from app.database import get_db
-from app.core.security import require_any_authenticated, get_current_user, get_user_company_filter
-from app.models.user import Role
-from app.models.detection import Detection, DetectionType, ThreatLevel
-from app.models.camera import Camera
-from app.models.user import User
+
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.core.security import get_user_company_filter, require_any_authenticated
+from app.database import get_db
+from app.models.camera import Camera
+from app.models.detection import Detection, ThreatLevel
+from app.models.user import Role, User
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -23,7 +25,7 @@ async def get_heatmap_data(
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
-    days: int = 7
+    days: int = 7,
 ):
     """Get heatmap data for incident locations."""
     company_filter = get_user_company_filter(current_user, company_id)
@@ -53,7 +55,7 @@ async def get_heatmap_data(
         .all()
     )
 
-    heatmap_data: Dict[str, dict] = {}
+    heatmap_data: dict[str, dict] = {}
     for lat, lon, zone, threat_level in rows:
         key = f"{lat},{lon}"
         if key not in heatmap_data:
@@ -77,7 +79,7 @@ async def get_timeline_data(
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
-    days: int = 7
+    days: int = 7,
 ):
     """Get timeline data for detections over time."""
     company_filter = get_user_company_filter(current_user, company_id)
@@ -87,15 +89,15 @@ async def get_timeline_data(
     start_date = datetime.utcnow() - timedelta(days=days)
 
     query = db.query(
-        func.date_trunc('hour', Detection.detected_at).label('hour'),
-        func.count(Detection.id).label('count')
+        func.date_trunc("hour", Detection.detected_at).label("hour"),
+        func.count(Detection.id).label("count"),
     ).filter(Detection.detected_at >= start_date)
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
 
-    detections = query.group_by(
-        func.date_trunc('hour', Detection.detected_at)
-    ).order_by('hour').all()
+    detections = (
+        query.group_by(func.date_trunc("hour", Detection.detected_at)).order_by("hour").all()
+    )
 
     timeline = [{"timestamp": str(hour), "count": count} for hour, count in detections]
 
@@ -108,7 +110,7 @@ async def get_detections_by_zone(
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
-    days: int = 7
+    days: int = 7,
 ):
     """Get detection counts grouped by zone."""
     company_filter = get_user_company_filter(current_user, company_id)
@@ -117,12 +119,11 @@ async def get_detections_by_zone(
 
     start_date = datetime.utcnow() - timedelta(days=days)
 
-    query = db.query(
-        Camera.zone,
-        func.count(Detection.id).label('count')
-    ).join(
-        Detection, Camera.id == Detection.camera_id
-    ).filter(Detection.detected_at >= start_date)
+    query = (
+        db.query(Camera.zone, func.count(Detection.id).label("count"))
+        .join(Detection, Camera.id == Detection.camera_id)
+        .filter(Detection.detected_at >= start_date)
+    )
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
 
@@ -139,7 +140,7 @@ async def get_threat_distribution(
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
-    days: int = 7
+    days: int = 7,
 ):
     """Get threat level distribution."""
     company_filter = get_user_company_filter(current_user, company_id)
@@ -148,10 +149,9 @@ async def get_threat_distribution(
 
     start_date = datetime.utcnow() - timedelta(days=days)
 
-    query = db.query(
-        Detection.threat_level,
-        func.count(Detection.id).label('count')
-    ).filter(Detection.detected_at >= start_date)
+    query = db.query(Detection.threat_level, func.count(Detection.id).label("count")).filter(
+        Detection.detected_at >= start_date
+    )
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
 
@@ -169,7 +169,7 @@ async def get_top_cameras(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
     days: int = 7,
-    limit: int = 10
+    limit: int = 10,
 ):
     """Get top cameras by detection count."""
     company_filter = get_user_company_filter(current_user, company_id)
@@ -178,26 +178,23 @@ async def get_top_cameras(
 
     start_date = datetime.utcnow() - timedelta(days=days)
 
-    query = db.query(
-        Camera.name,
-        Camera.location,
-        func.count(Detection.id).label('count')
-    ).join(
-        Detection, Camera.id == Detection.camera_id
-    ).filter(Detection.detected_at >= start_date)
+    query = (
+        db.query(Camera.name, Camera.location, func.count(Detection.id).label("count"))
+        .join(Detection, Camera.id == Detection.camera_id)
+        .filter(Detection.detected_at >= start_date)
+    )
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
 
-    results = query.group_by(
-        Camera.id, Camera.name, Camera.location
-    ).order_by(
-        func.count(Detection.id).desc()
-    ).limit(limit).all()
+    results = (
+        query.group_by(Camera.id, Camera.name, Camera.location)
+        .order_by(func.count(Detection.id).desc())
+        .limit(limit)
+        .all()
+    )
 
     top_cameras = [
-        {"name": name, "location": location, "count": count}
-        for name, location, count in results
+        {"name": name, "location": location, "count": count} for name, location, count in results
     ]
 
     return {"top_cameras": top_cameras}
-

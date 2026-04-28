@@ -2,22 +2,28 @@
 Evidence management endpoints.
 All endpoints respect multi-tenant isolation via company access checks.
 """
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Request, Query
-from fastapi.responses import FileResponse, Response
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.core.security import require_any_authenticated, get_current_user, check_company_access, get_user_company_filter
-from app.schemas.evidence import EvidenceCreate, EvidenceResponse
-from app.models.evidence import Evidence
-from app.models.detection import Detection, DetectionType, ThreatLevel
-from app.models.camera import Camera
-from app.models.user import User, Role
-from app.models.audit_log import create_audit_log
-from pathlib import Path
+
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
 import aiofiles
-import json
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+
+from app.core.security import (
+    check_company_access,
+    get_user_company_filter,
+    require_any_authenticated,
+)
+from app.database import get_db
+from app.models.audit_log import create_audit_log
+from app.models.camera import Camera
+from app.models.detection import Detection, DetectionType, ThreatLevel
+from app.models.evidence import Evidence
+from app.models.user import Role, User
+from app.schemas.evidence import EvidenceResponse
 
 router = APIRouter(prefix="/evidence", tags=["evidence"])
 
@@ -27,11 +33,13 @@ def _check_detection_access(detection: Detection, current_user: User):
     if detection.company_id and not check_company_access(current_user, detection.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to access this evidence"
+            detail="Not enough permissions to access this evidence",
         )
 
 
-def _enrich_evidence(evidence: Evidence, detection: Detection, camera: Camera = None) -> EvidenceResponse:
+def _enrich_evidence(
+    evidence: Evidence, detection: Detection, camera: Camera = None
+) -> EvidenceResponse:
     """Add detection context to evidence response."""
     # Build image URL from file path: ./evidence/file.jpg -> /evidence/file.jpg
     image_url = None
@@ -63,32 +71,28 @@ async def create_evidence(
     metadata_json: str = None,
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """Upload evidence (snapshot/image) for a detection."""
     # Verify detection exists
     detection = db.query(Detection).filter(Detection.id == detection_id).first()
     if not detection:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Detection not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Detection not found")
 
     _check_detection_access(detection, current_user)
 
     # Save uploaded file
     from app.config import settings
+
     evidence_dir = Path(settings.EVIDENCE_DIR)
     file_path = evidence_dir / f"evidence_{detection_id}_{image_file.filename}"
 
-    async with aiofiles.open(file_path, 'wb') as f:
+    async with aiofiles.open(file_path, "wb") as f:
         content = await image_file.read()
         await f.write(content)
 
     db_evidence = Evidence(
-        detection_id=detection_id,
-        image_path=str(file_path),
-        metadata_json=metadata_json
+        detection_id=detection_id, image_path=str(file_path), metadata_json=metadata_json
     )
     db.add(db_evidence)
     db.commit()
@@ -97,31 +101,33 @@ async def create_evidence(
     return db_evidence
 
 
-@router.get("", response_model=List[EvidenceResponse])
+@router.get("", response_model=list[EvidenceResponse])
 async def list_evidence(
     request: Request,
     detection_id: Optional[int] = None,
     camera_id: Optional[int] = Query(None, description="Filter by camera"),
     detection_type: Optional[DetectionType] = Query(None, description="Filter by detection type"),
     threat_level: Optional[ThreatLevel] = Query(None, description="Filter by threat level"),
-    min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confidence threshold"),
+    min_confidence: Optional[float] = Query(
+        None, ge=0.0, le=1.0, description="Minimum confidence threshold"
+    ),
     start_date: Optional[datetime] = Query(None, description="Filter from date"),
     end_date: Optional[datetime] = Query(None, description="Filter to date"),
     limit: int = Query(20, ge=1, le=200, description="Max results"),
     offset: int = Query(0, ge=0, description="Skip results"),
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """List evidence with filters and pagination. Includes detection context."""
     company_filter = get_user_company_filter(current_user, company_id)
     if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
         return []
 
-    query = db.query(Evidence, Detection, Camera).join(
-        Detection, Evidence.detection_id == Detection.id
-    ).join(
-        Camera, Detection.camera_id == Camera.id
+    query = (
+        db.query(Evidence, Detection, Camera)
+        .join(Detection, Evidence.detection_id == Detection.id)
+        .join(Camera, Detection.camera_id == Camera.id)
     )
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
@@ -169,7 +175,7 @@ async def get_evidence(
     evidence_id: int,
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """Get evidence by ID with detection context."""
     evidence, detection, camera = _load_evidence_with_detection(evidence_id, current_user, db)
@@ -181,7 +187,7 @@ async def view_evidence_image(
     evidence_id: int,
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """View evidence image inline (for displaying in frontend).
 
@@ -209,7 +215,7 @@ async def download_evidence(
     evidence_id: int,
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """Download evidence image file."""
     evidence, _det, _cam = _load_evidence_with_detection(evidence_id, current_user, db)
@@ -229,14 +235,15 @@ async def download_evidence(
 @router.post("/export")
 async def export_evidence(
     request: Request,
-    detection_ids: List[int],
+    detection_ids: list[int],
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """Export evidence as CSV with metadata. Respects company isolation."""
-    import pandas as pd
     from io import StringIO
+
+    import pandas as pd
     from fastapi.responses import StreamingResponse
 
     company_filter = get_user_company_filter(current_user, company_id)
@@ -251,10 +258,16 @@ async def export_evidence(
     accessible_ids = [d.id for d in detections]
 
     # Audit log
-    db.add(create_audit_log(
-        request, current_user.id, "export_evidence", "evidence", None,
-        {"detection_ids": accessible_ids}
-    ))
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "export_evidence",
+            "evidence",
+            None,
+            {"detection_ids": accessible_ids},
+        )
+    )
     db.commit()
 
     evidence_list = db.query(Evidence).filter(Evidence.detection_id.in_(accessible_ids)).all()
@@ -264,16 +277,18 @@ async def export_evidence(
     for evidence in evidence_list:
         detection = next((d for d in detections if d.id == evidence.detection_id), None)
         if detection:
-            export_data.append({
-                "detection_id": detection.id,
-                "detection_type": detection.detection_type.value,
-                "threat_level": detection.threat_level.value,
-                "confidence": detection.confidence,
-                "timestamp": detection.frame_timestamp.isoformat(),
-                "evidence_id": evidence.id,
-                "image_path": evidence.image_path,
-                "metadata": evidence.metadata_json
-            })
+            export_data.append(
+                {
+                    "detection_id": detection.id,
+                    "detection_type": detection.detection_type.value,
+                    "threat_level": detection.threat_level.value,
+                    "confidence": detection.confidence,
+                    "timestamp": detection.frame_timestamp.isoformat(),
+                    "evidence_id": evidence.id,
+                    "image_path": evidence.image_path,
+                    "metadata": evidence.metadata_json,
+                }
+            )
 
     df = pd.DataFrame(export_data)
     output = StringIO()
@@ -283,5 +298,5 @@ async def export_evidence(
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=evidence_export.csv"}
+        headers={"Content-Disposition": "attachment; filename=evidence_export.csv"},
     )

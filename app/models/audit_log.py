@@ -1,20 +1,25 @@
 """
 Audit log model for tracking user actions.
 """
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
+
+from fastapi import Request
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from fastapi import Request
+
 from app.database import Base
 
 
 class AuditLog(Base):
     """Audit log model for tracking system events."""
+
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
-    action = Column(String(100), nullable=False, index=True)  # e.g., "login", "create_alert", "export_evidence"
+    action = Column(
+        String(100), nullable=False, index=True
+    )  # e.g., "login", "create_alert", "export_evidence"
     resource_type = Column(String(50), index=True)  # e.g., "detection", "user", "camera"
     resource_id = Column(Integer, nullable=True)
     ip_address = Column(String(45))
@@ -46,4 +51,3 @@ def create_audit_log(
         user_agent=ua,
         details=details,
     )
-

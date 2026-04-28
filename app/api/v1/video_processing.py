@@ -9,39 +9,42 @@ Optimizations:
 - Background email sending (non-blocking)
 - Thread pool so event loop stays free
 """
+
 import asyncio
-import uuid
-import os
 import json
 import logging
+import os
 import threading
-from typing import Optional
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from queue import Queue, Empty
-from concurrent.futures import ThreadPoolExecutor
-
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request, Query
-from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
-
-from app.database import get_db, SessionLocal
-from app.config import settings
-from app.core.security import require_security_officer, require_any_authenticated, check_company_access, get_user_company_filter
-from app.models.user import User, Role
-from app.models.camera import Camera
-from app.models.detection import Detection, DetectionType, ThreatLevel
-from app.models.alert import Alert, AlertStatus
-from app.models.evidence import Evidence
-from app.models.audit_log import create_audit_log
-from app.services.detection_service import detection_service
-from app.services.violence_model import ViolenceClassifier
-from app.services.video_service import video_service
-from app.services.email_service import email_service
-from app.services.sms_service import send_alert_sms
+from queue import Empty, Queue
+from typing import Optional
 
 import cv2
 import numpy as np
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.core.security import (
+    check_company_access,
+    require_any_authenticated,
+    require_security_officer,
+)
+from app.database import SessionLocal, get_db
+from app.models.alert import Alert, AlertStatus
+from app.models.camera import Camera
+from app.models.detection import Detection, DetectionType
+from app.models.evidence import Evidence
+from app.models.user import Role, User
+from app.services.detection_service import detection_service
+from app.services.email_service import email_service
+from app.services.sms_service import send_alert_sms
+from app.services.video_service import video_service
+from app.services.violence_model import ViolenceClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +115,7 @@ def _save_job_to_disk(job: dict) -> None:
     """
     try:
         payload = {k: v for k, v in job.items() if k not in _JOB_TRANSIENT_FIELDS}
-        _job_meta_path(job["job_id"]).write_text(
-            json.dumps(payload, default=str), encoding="utf-8"
-        )
+        _job_meta_path(job["job_id"]).write_text(json.dumps(payload, default=str), encoding="utf-8")
     except Exception as exc:
         logger.warning("Could not save job %s to disk: %s", job.get("job_id"), exc)
 
@@ -162,7 +163,8 @@ def load_jobs_from_disk() -> None:
     if loaded:
         logger.info(
             "Restored %d video job(s) from disk (%d marked failed due to restart).",
-            loaded, failed_rescued,
+            loaded,
+            failed_rescued,
         )
 
 
@@ -179,7 +181,7 @@ def _email_worker():
             task = _email_queue.get(timeout=5)
         except Empty:
             continue
-        if task is None:          # poison pill
+        if task is None:  # poison pill
             break
 
         alert_id = task.get("alert_id")
@@ -200,7 +202,9 @@ def _email_worker():
                             db.commit()
                         db.close()
                     except Exception as db_err:
-                        logger.warning("Failed to update alert %s email status: %s", alert_id, db_err)
+                        logger.warning(
+                            "Failed to update alert %s email status: %s", alert_id, db_err
+                        )
             except Exception as e:
                 logger.warning("Background email failed: %s", e)
 
@@ -259,7 +263,9 @@ async def start_video_processing(
     camera_id: int,
     video_file: UploadFile = File(...),
     generate_video: bool = Query(True, description="Generate annotated output video (slower)"),
-    process_fps: int = Query(1, ge=1, le=30, description="Frames per second to analyze (1=fast, 30=every frame)"),
+    process_fps: int = Query(
+        1, ge=1, le=30, description="Frames per second to analyze (1=fast, 30=every frame)"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_security_officer),
 ):
@@ -278,6 +284,7 @@ async def start_video_processing(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
 
     import aiofiles
+
     upload_path = Path(settings.UPLOAD_DIR) / f"{uuid.uuid4().hex}_{video_file.filename}"
     async with aiofiles.open(upload_path, "wb") as f:
         content = await video_file.read()
@@ -288,7 +295,7 @@ async def start_video_processing(
     job_id = uuid.uuid4().hex
     output_filename = f"processed_{job_id}.mp4"
     output_path = Path(settings.PROCESSED_VIDEO_DIR) / output_filename
-    
+
     # Heatmap video output (for crowd density visualization)
     heatmap_filename = f"heatmap_{job_id}.mp4"
     heatmap_path = Path(settings.PROCESSED_VIDEO_DIR) / heatmap_filename
@@ -354,10 +361,22 @@ async def start_video_processing(
 # Per-frame analysis helper (shared by fast + slow path)
 # ---------------------------------------------------------------------------
 def _run_analysis(
-    ai_frame, full_frame, timestamp, previous_frames,
-    object_history, enabled_modules, needs_resize,
-    ai_width, ai_height, last_detection_time, dedup_interval,
-    camera_id, company_id, job, db, pending_db_count,
+    ai_frame,
+    full_frame,
+    timestamp,
+    previous_frames,
+    object_history,
+    enabled_modules,
+    needs_resize,
+    ai_width,
+    ai_height,
+    last_detection_time,
+    dedup_interval,
+    camera_id,
+    company_id,
+    job,
+    db,
+    pending_db_count,
     violence_history_tail: int = 3,
 ) -> tuple:
     """Run detection on one frame, persist results. Returns (active_detections, heatmap_overlay)."""
@@ -369,22 +388,24 @@ def _run_analysis(
     if previous_frames:
         tail = previous_frames[-n_prev:]
         ai_prev = (
-            [cv2.resize(f, (ai_width, ai_height)) for f in tail]
-            if needs_resize
-            else list(tail)
+            [cv2.resize(f, (ai_width, ai_height)) for f in tail] if needs_resize else list(tail)
         )
 
     all_raw = detection_service.detect_all_parallel(
-        ai_frame, ai_prev, timestamp, object_history, enabled_modules,
+        ai_frame,
+        ai_prev,
+        timestamp,
+        object_history,
+        enabled_modules,
         full_frame=full_frame,  # CSRNet needs original resolution
     )
 
     for det_type, det in all_raw:
         dt_elapsed = (timestamp - last_detection_time.get(det_type, datetime.min)).total_seconds()
-        is_cached_crowd = (
-            det_type == DetectionType.CROWD_DENSITY and bool(det.get("_crowd_cached", False))
+        is_cached_crowd = det_type == DetectionType.CROWD_DENSITY and bool(
+            det.get("_crowd_cached", False)
         )
-        
+
         # Skip dedup for crowd_density — process every frame
         if det_type != DetectionType.CROWD_DENSITY and dt_elapsed < dedup_interval:
             continue
@@ -394,24 +415,33 @@ def _run_analysis(
         module_settings = enabled_modules.get(det_type.value, {})
         min_conf = module_settings.get("min_confidence")
         # Crowd density uses count/density semantics; don't drop it via generic confidence gate.
-        if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
+        if (
+            det_type != DetectionType.CROWD_DENSITY
+            and min_conf is not None
+            and confidence < min_conf
+        ):
             continue
 
-        threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
+        threat_level = detection_service.classify_threat_level(
+            det_type, confidence, det, module_settings
+        )
         bbox = det.get("bbox", [0, 0, 0, 0])
 
         # Extract density map for heatmap generation (before saving to DB)
         density_map_normalized = det.get("density_map_normalized")
         if det_type == DetectionType.CROWD_DENSITY and density_map_normalized is not None:
             heatmap_overlay = video_service.generate_crowd_heatmap(
-                full_frame, density_map_normalized,
+                full_frame,
+                density_map_normalized,
                 count=det.get("count", 0),
-                density=det.get("density", 0.0)
+                density=det.get("density", 0.0),
             )
 
         # Cached crowd results are only for visualization speed; skip DB/evidence/alerts.
         if is_cached_crowd:
-            if det_type == DetectionType.CROWD_DENSITY and getattr(settings, "CROWD_DEBUG_LOG", False):
+            if det_type == DetectionType.CROWD_DENSITY and getattr(
+                settings, "CROWD_DEBUG_LOG", False
+            ):
                 logger.info(
                     "\n[crowd debug] frame=%s count=%s density=%.6f cached=%s persisted=%s",
                     job.get("current_frame", -1),
@@ -430,12 +460,10 @@ def _run_analysis(
             }
             active_detections.append(det_entry)
             continue
-        
+
         # Remove non-JSON-serializable fields before saving to database
         det_for_db = {
-            k: v
-            for k, v in det.items()
-            if k not in ("density_map_normalized", "_crowd_cached")
+            k: v for k, v in det.items() if k not in ("density_map_normalized", "_crowd_cached")
         }
 
         db_detection = Detection(
@@ -470,8 +498,11 @@ def _run_analysis(
         if det_type != DetectionType.CROWD_DENSITY or save_crowd_evidence:
             label = f"{det.get('class', det_type.value)} {confidence:.0%}"
             snapshot_path = video_service.save_snapshot(
-                full_frame, db_detection.id, prefix=det_type.value,
-                bbox=bbox, label=label,
+                full_frame,
+                db_detection.id,
+                prefix=det_type.value,
+                bbox=bbox,
+                label=label,
             )
             db_evidence = Evidence(
                 detection_id=db_detection.id,
@@ -497,24 +528,26 @@ def _run_analysis(
             db.flush()
 
             # Queue email in background — never block inference
-            _email_queue.put({
-                "alert_id": alert.id,
-                "alert_preference": job.get("user_alert_preference", "email"),
-                "sms_number": job.get("user_phone", ""),
-                "kwargs": {
-                    "to_emails": [job["user_email"]],
-                    "subject": alert.title,
-                    "message": alert.message,
-                    "snapshot_path": snapshot_path,
-                    "metadata": {
-                        "Detection Type": det_type.value,
-                        "Threat Level": threat_level.value,
-                        "Confidence": f"{confidence:.2%}",
-                        "Camera": job["camera_name"],
-                        "Timestamp": timestamp.isoformat(),
+            _email_queue.put(
+                {
+                    "alert_id": alert.id,
+                    "alert_preference": job.get("user_alert_preference", "email"),
+                    "sms_number": job.get("user_phone", ""),
+                    "kwargs": {
+                        "to_emails": [job["user_email"]],
+                        "subject": alert.title,
+                        "message": alert.message,
+                        "snapshot_path": snapshot_path,
+                        "metadata": {
+                            "Detection Type": det_type.value,
+                            "Threat Level": threat_level.value,
+                            "Confidence": f"{confidence:.2%}",
+                            "Camera": job["camera_name"],
+                            "Timestamp": timestamp.isoformat(),
+                        },
                     },
                 }
-            })
+            )
 
             job["total_alerts"] += 1
 
@@ -530,16 +563,18 @@ def _run_analysis(
             det_entry["density"] = det.get("density", 0.0)
         active_detections.append(det_entry)
 
-        job["detections"].append({
-            "id": db_detection.id,
-            "detection_type": det_type.value,
-            "threat_level": threat_level.value,
-            "confidence": round(confidence, 4),
-            "class": det.get("class", det_type.value),
-            "evidence_id": db_evidence.id if db_evidence else None,
-            "timestamp": timestamp.isoformat(),
-            "frame_number": job.get("current_frame", 0),
-        })
+        job["detections"].append(
+            {
+                "id": db_detection.id,
+                "detection_type": det_type.value,
+                "threat_level": threat_level.value,
+                "confidence": round(confidence, 4),
+                "class": det.get("class", det_type.value),
+                "evidence_id": db_evidence.id if db_evidence else None,
+                "timestamp": timestamp.isoformat(),
+                "frame_number": job.get("current_frame", 0),
+            }
+        )
         job["total_detections"] += 1
         pending_db_count += 1
 
@@ -582,7 +617,9 @@ def _process_video_sync(job_id: str):
         if generate_video:
             writer = video_service.create_video_writer(output_path, fps, width, height)
             # Always create heatmap writer (will write every frame)
-            heatmap_writer = video_service.create_video_writer(job["heatmap_video"], fps, width, height)
+            heatmap_writer = video_service.create_video_writer(
+                job["heatmap_video"], fps, width, height
+            )
 
         previous_frames: list = []
         object_history: dict = {}
@@ -597,12 +634,8 @@ def _process_video_sync(job_id: str):
 
         enabled_modules = detection_service.get_enabled_modules(db, company_id)
         process_fps = float(job.get("process_fps") or 1)
-        prev_buf_max = _violence_rolling_buffer_size(
-            process_fps, "violence" in enabled_modules
-        )
-        violence_tail_for_analysis = (
-            prev_buf_max if "violence" in enabled_modules else 3
-        )
+        prev_buf_max = _violence_rolling_buffer_size(process_fps, "violence" in enabled_modules)
+        violence_tail_for_analysis = prev_buf_max if "violence" in enabled_modules else 3
         # Only when tuning crowd (avoids noise when company has crowd disabled)
         if getattr(settings, "CROWD_DEBUG_LOG", False) and "crowd_density" in enabled_modules:
             logger.info(
@@ -630,11 +663,19 @@ def _process_video_sync(job_id: str):
         needs_resize = scale < 1.0
 
         analyzed_count = total_frames // process_every_n if process_every_n else total_frames
-        logger.info("Job %s: %d frames, analyze %d (every %d), video=%s, resize=%s (%.0f%%)",
-                     job_id, total_frames, analyzed_count, process_every_n,
-                     generate_video, needs_resize, scale * 100)
+        logger.info(
+            "Job %s: %d frames, analyze %d (every %d), video=%s, resize=%s (%.0f%%)",
+            job_id,
+            total_frames,
+            analyzed_count,
+            process_every_n,
+            generate_video,
+            needs_resize,
+            scale * 100,
+        )
 
         import time as _time
+
         t_start = _time.perf_counter()
 
         try:
@@ -650,12 +691,26 @@ def _process_video_sync(job_id: str):
                     timestamp = video_start + elapsed
 
                     if frame_index % process_every_n == 0:
-                        ai_frame = cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
+                        ai_frame = (
+                            cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
+                        )
                         active_detections, heatmap_overlay = _run_analysis(
-                            ai_frame, frame, timestamp, previous_frames,
-                            object_history, enabled_modules, needs_resize,
-                            ai_width, ai_height, last_detection_time, dedup_interval,
-                            camera_id, company_id, job, db, pending_db_count,
+                            ai_frame,
+                            frame,
+                            timestamp,
+                            previous_frames,
+                            object_history,
+                            enabled_modules,
+                            needs_resize,
+                            ai_width,
+                            ai_height,
+                            last_detection_time,
+                            dedup_interval,
+                            camera_id,
+                            company_id,
+                            job,
+                            db,
+                            pending_db_count,
                             violence_history_tail=violence_tail_for_analysis,
                         )
                         previous_frames.append(frame)
@@ -677,7 +732,7 @@ def _process_video_sync(job_id: str):
                                     annotated, fw, heatmap_overlay, 1.0 - fw, 0
                                 )
                         writer.write(annotated)
-                        
+
                         # Write heatmap video for every frame (persist last heatmap for non-analyzed frames)
                         if heatmap_writer is not None:
                             if heatmap_overlay is not None:
@@ -691,7 +746,9 @@ def _process_video_sync(job_id: str):
                             heatmap_writer.write(heatmap_frame)
 
                     job["current_frame"] = frame_index
-                    job["progress"] = min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
+                    job["progress"] = (
+                        min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
+                    )
             else:
                 # ── FAST PATH: seek directly to analysis frames, skip decode ──
                 # This skips reading ~97% of frames (e.g., 3480 out of 3600)
@@ -713,10 +770,22 @@ def _process_video_sync(job_id: str):
 
                     ai_frame = cv2.resize(frame, (ai_width, ai_height)) if needs_resize else frame
                     active_detections, heatmap_overlay = _run_analysis(
-                        ai_frame, frame, timestamp, previous_frames,
-                        object_history, enabled_modules, needs_resize,
-                        ai_width, ai_height, last_detection_time, dedup_interval,
-                        camera_id, company_id, job, db, pending_db_count,
+                        ai_frame,
+                        frame,
+                        timestamp,
+                        previous_frames,
+                        object_history,
+                        enabled_modules,
+                        needs_resize,
+                        ai_width,
+                        ai_height,
+                        last_detection_time,
+                        dedup_interval,
+                        camera_id,
+                        company_id,
+                        job,
+                        db,
+                        pending_db_count,
                         violence_history_tail=violence_tail_for_analysis,
                     )
                     previous_frames.append(frame)
@@ -725,7 +794,9 @@ def _process_video_sync(job_id: str):
                     pending_db_count = job.get("_pdb", 0)
 
                     job["current_frame"] = frame_index
-                    job["progress"] = min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
+                    job["progress"] = (
+                        min(int((frame_index / total_frames) * 100), 100) if total_frames > 0 else 0
+                    )
 
         finally:
             cap.release()
@@ -735,9 +806,12 @@ def _process_video_sync(job_id: str):
                 heatmap_writer.release()
 
         t_elapsed = _time.perf_counter() - t_start
-        logger.info("Job %s: inference loop took %.1fs (%.2fs/frame)",
-                     job_id, t_elapsed,
-                     t_elapsed / max(analyzed_count, 1))
+        logger.info(
+            "Job %s: inference loop took %.1fs (%.2fs/frame)",
+            job_id,
+            t_elapsed,
+            t_elapsed / max(analyzed_count, 1),
+        )
 
         # Final commit
         if pending_db_count > 0:
@@ -760,8 +834,12 @@ def _process_video_sync(job_id: str):
         job["status"] = "completed"
         job["progress"] = 100
         job["completed_at"] = datetime.utcnow().isoformat()
-        logger.info("Job %s completed: %d detections, %d alerts",
-                     job_id, job["total_detections"], job["total_alerts"])
+        logger.info(
+            "Job %s completed: %d detections, %d alerts",
+            job_id,
+            job["total_detections"],
+            job["total_alerts"],
+        )
         _save_job_to_disk(job)
 
     except Exception as e:
@@ -827,6 +905,7 @@ async def stream_progress(
 
     async def event_generator():
         import json
+
         while True:
             job = _jobs.get(job_id)
             if not job:
@@ -878,14 +957,21 @@ async def get_processed_video(
     _check_job_access(job, current_user)
 
     if job["status"] != "completed":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}"
+        )
 
     if not job.get("output_video_url"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No video generated. Use generate_video=true when processing.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No video generated. Use generate_video=true when processing.",
+        )
 
     file_path = Path(job["output_video"])
     if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Processed video file not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Processed video file not found"
+        )
 
     return FileResponse(
         path=str(file_path),
@@ -907,14 +993,18 @@ async def download_processed_video(
     _check_job_access(job, current_user)
 
     if job["status"] != "completed":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is {job['status']}"
+        )
 
     if not job.get("output_video_url"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No video generated.")
 
     file_path = Path(job["output_video"])
     if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Processed video file not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Processed video file not found"
+        )
 
     return FileResponse(
         path=str(file_path),
@@ -952,19 +1042,21 @@ async def list_jobs(
 
         output_video_url, heatmap_video_url = _job_response_urls(request, job)
 
-        results.append({
-            "job_id": job["job_id"],
-            "status": job["status"],
-            "progress": job["progress"],
-            "total_frames": job["total_frames"],
-            "total_detections": job["total_detections"],
-            "total_alerts": job["total_alerts"],
-            "filename": job["filename"],
-            "camera_id": job["camera_id"],
-            "started_at": job["started_at"],
-            "completed_at": job["completed_at"],
-            "output_video_url": output_video_url,
-            "heatmap_video_url": heatmap_video_url,
-        })
+        results.append(
+            {
+                "job_id": job["job_id"],
+                "status": job["status"],
+                "progress": job["progress"],
+                "total_frames": job["total_frames"],
+                "total_detections": job["total_detections"],
+                "total_alerts": job["total_alerts"],
+                "filename": job["filename"],
+                "camera_id": job["camera_id"],
+                "started_at": job["started_at"],
+                "completed_at": job["completed_at"],
+                "output_video_url": output_video_url,
+                "heatmap_video_url": heatmap_video_url,
+            }
+        )
 
     return results

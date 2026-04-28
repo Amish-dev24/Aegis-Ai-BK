@@ -1,28 +1,35 @@
 """
 Detection endpoints for managing AI detections.
 """
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
-from app.database import get_db
-from app.core.security import require_any_authenticated, require_security_officer, get_current_user, get_user_company_filter, check_company_access
-from app.models.user import Role
-from app.schemas.detection import DetectionCreate, DetectionResponse, DetectionFilter
-from app.models.detection import Detection, DetectionType, ThreatLevel
-from app.models.camera import Camera
-from app.models.user import User
-from app.services.detection_service import detection_service
-from app.services.violence_model import ViolenceClassifier
-from app.services.video_service import video_service
-from app.services.email_service import email_service
-from app.models.alert import Alert, AlertStatus
-from app.models.evidence import Evidence
-from app.models.detection_settings import GlobalModuleSettings, CompanyDetectionSettings
-from app.models.audit_log import create_audit_log
+
+from datetime import datetime
+from typing import Optional
+
 import cv2
 import numpy as np
-from datetime import datetime
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.core.security import (
+    check_company_access,
+    get_user_company_filter,
+    require_any_authenticated,
+    require_security_officer,
+)
+from app.database import get_db
+from app.models.alert import Alert, AlertStatus
+from app.models.audit_log import create_audit_log
+from app.models.camera import Camera
+from app.models.detection import Detection, DetectionType, ThreatLevel
+from app.models.detection_settings import CompanyDetectionSettings, GlobalModuleSettings
+from app.models.evidence import Evidence
+from app.models.user import Role, User
+from app.schemas.detection import DetectionCreate, DetectionFilter, DetectionResponse
+from app.services.detection_service import detection_service
+from app.services.email_service import email_service
+from app.services.video_service import video_service
+from app.services.violence_model import ViolenceClassifier
 
 router = APIRouter(prefix="/detections", tags=["detections"])
 
@@ -32,38 +39,44 @@ async def create_detection(
     request: Request,
     detection_data: DetectionCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """Create a detection record (typically called by detection service)."""
     # Verify camera exists
     camera = db.query(Camera).filter(Camera.id == detection_data.camera_id).first()
     if not camera:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Camera not found"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+
     # Check company access to camera
     if camera.company_id and not check_company_access(current_user, camera.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to create detection for this camera"
+            detail="Not enough permissions to create detection for this camera",
         )
-    
+
     detection_dict = detection_data.dict()
     # Set company_id from camera
     detection_dict["company_id"] = camera.company_id
-    
+
     db_detection = Detection(**detection_dict)
     db.add(db_detection)
     db.commit()
     db.refresh(db_detection)
 
     # Audit log
-    db.add(create_audit_log(
-        request, current_user.id, "create_detection", "detection", db_detection.id,
-        {"detection_type": db_detection.detection_type.value, "threat_level": db_detection.threat_level.value}
-    ))
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "create_detection",
+            "detection",
+            db_detection.id,
+            {
+                "detection_type": db_detection.detection_type.value,
+                "threat_level": db_detection.threat_level.value,
+            },
+        )
+    )
     db.commit()
 
     # Create alert + send email for medium/high/critical threats
@@ -73,7 +86,7 @@ async def create_detection(
             company_id=camera.company_id,
             title=f"{db_detection.detection_type.value.replace('_', ' ').title()} – {db_detection.threat_level.value.upper()}",
             message=f"Detection of {db_detection.detection_type.value} with {db_detection.confidence:.2%} confidence",
-            status=AlertStatus.PENDING
+            status=AlertStatus.PENDING,
         )
         db.add(alert)
         db.flush()
@@ -111,7 +124,7 @@ async def list_detections(
     filter_params: DetectionFilter = Depends(),
     company_id: Optional[int] = Query(None, description="Filter by company (aegis_admin only)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """List detections with filtering. Company users see only their company's detections."""
     company_filter = get_user_company_filter(current_user, company_id)
@@ -121,7 +134,7 @@ async def list_detections(
     query = db.query(Detection)
     if company_filter is not None:
         query = query.filter(Detection.company_id == company_filter)
-    
+
     if filter_params.camera_id:
         query = query.filter(Detection.camera_id == filter_params.camera_id)
     if filter_params.detection_type:
@@ -134,8 +147,13 @@ async def list_detections(
         query = query.filter(Detection.frame_timestamp <= filter_params.end_date)
     if filter_params.min_confidence:
         query = query.filter(Detection.confidence >= filter_params.min_confidence)
-    
-    detections = query.order_by(Detection.detected_at.desc()).offset(filter_params.offset).limit(filter_params.limit).all()
+
+    detections = (
+        query.order_by(Detection.detected_at.desc())
+        .offset(filter_params.offset)
+        .limit(filter_params.limit)
+        .all()
+    )
 
     # Batch-load evidence in one query instead of one query per detection (N+1 fix)
     det_ids = [d.id for d in detections]
@@ -144,22 +162,30 @@ async def list_detections(
         evidence_map = {
             e.detection_id: e.id
             for e in db.query(Evidence.detection_id, Evidence.id)
-                        .filter(Evidence.detection_id.in_(det_ids))
-                        .all()
+            .filter(Evidence.detection_id.in_(det_ids))
+            .all()
         }
 
     result = []
     for det in detections:
-        result.append({
-            "id": det.id, "camera_id": det.camera_id, "company_id": det.company_id,
-            "detection_type": det.detection_type.value if det.detection_type else None,
-            "threat_level": det.threat_level.value if det.threat_level else None,
-            "confidence": det.confidence, "frame_timestamp": det.frame_timestamp,
-            "detected_at": det.detected_at, "bbox_x": det.bbox_x, "bbox_y": det.bbox_y,
-            "bbox_width": det.bbox_width, "bbox_height": det.bbox_height,
-            "detection_metadata": det.detection_metadata,
-            "evidence_id": evidence_map.get(det.id),
-        })
+        result.append(
+            {
+                "id": det.id,
+                "camera_id": det.camera_id,
+                "company_id": det.company_id,
+                "detection_type": det.detection_type.value if det.detection_type else None,
+                "threat_level": det.threat_level.value if det.threat_level else None,
+                "confidence": det.confidence,
+                "frame_timestamp": det.frame_timestamp,
+                "detected_at": det.detected_at,
+                "bbox_x": det.bbox_x,
+                "bbox_y": det.bbox_y,
+                "bbox_width": det.bbox_width,
+                "bbox_height": det.bbox_height,
+                "detection_metadata": det.detection_metadata,
+                "evidence_id": evidence_map.get(det.id),
+            }
+        )
     return result
 
 
@@ -167,23 +193,20 @@ async def list_detections(
 async def get_detection(
     detection_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """Get detection by ID. Company users can only access their company's detections."""
     detection = db.query(Detection).filter(Detection.id == detection_id).first()
     if not detection:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Detection not found"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Detection not found")
+
     # Check company access
     if detection.company_id and not check_company_access(current_user, detection.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to access this detection"
+            detail="Not enough permissions to access this detection",
         )
-    
+
     return detection
 
 
@@ -193,7 +216,7 @@ async def process_video(
     camera_id: int,
     video_file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_security_officer)
+    current_user: User = Depends(require_security_officer),
 ):
     """Process a video file through all detection modules.
     DEPRECATED: Use POST /video/process instead for non-blocking processing with progress tracking.
@@ -201,24 +224,23 @@ async def process_video(
     # Verify camera exists
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Camera not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
 
     # Check company access to camera
     if camera.company_id and not check_company_access(current_user, camera.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to process video for this camera"
+            detail="Not enough permissions to process video for this camera",
         )
 
     # Save uploaded file temporarily
-    from pathlib import Path
-    import aiofiles
     import os
+    from pathlib import Path
+
+    import aiofiles
+
     upload_path = Path(f"./uploads/{video_file.filename}")
-    async with aiofiles.open(upload_path, 'wb') as f:
+    async with aiofiles.open(upload_path, "wb") as f:
         content = await video_file.read()
         await f.write(content)
 
@@ -236,9 +258,7 @@ async def process_video(
         # Get enabled modules (respects global + company settings)
         enabled_modules = detection_service.get_enabled_modules(db, camera.company_id)
         prev_buf_max = (
-            max(0, ViolenceClassifier.NUM_FRAMES - 1)
-            if "violence" in enabled_modules
-            else 10
+            max(0, ViolenceClassifier.NUM_FRAMES - 1) if "violence" in enabled_modules else 10
         )
 
         for frame, timestamp in video_service.read_video_file(str(upload_path)):
@@ -281,7 +301,9 @@ async def process_video(
 
             # Persist detections (deduplicated — skip if same type detected within 2 sec)
             for det_type, det in all_raw_detections:
-                elapsed = (timestamp - last_detection_time.get(det_type, datetime.min)).total_seconds()
+                elapsed = (
+                    timestamp - last_detection_time.get(det_type, datetime.min)
+                ).total_seconds()
                 if elapsed < dedup_interval:
                     continue
                 last_detection_time[det_type] = timestamp
@@ -291,10 +313,16 @@ async def process_video(
 
                 # Skip if below company's custom min_confidence
                 min_conf = module_settings.get("min_confidence")
-                if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
+                if (
+                    det_type != DetectionType.CROWD_DENSITY
+                    and min_conf is not None
+                    and confidence < min_conf
+                ):
                     continue
 
-                threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
+                threat_level = detection_service.classify_threat_level(
+                    det_type, confidence, det, module_settings
+                )
                 bbox = det.get("bbox", [0, 0, 0, 0])
 
                 db_detection = Detection(
@@ -316,8 +344,11 @@ async def process_video(
                 # Save evidence snapshot with bounding box drawn
                 label = f"{det.get('class', det_type.value)} {confidence:.0%}"
                 snapshot_path = video_service.save_snapshot(
-                    frame, db_detection.id, prefix=det_type.value,
-                    bbox=bbox, label=label,
+                    frame,
+                    db_detection.id,
+                    prefix=det_type.value,
+                    bbox=bbox,
+                    label=label,
                 )
                 db_evidence = Evidence(
                     detection_id=db_detection.id,
@@ -357,15 +388,17 @@ async def process_video(
                     alert.email_sent_at = datetime.utcnow()
                     alerts_created += 1
 
-                detection_results.append({
-                    "id": db_detection.id,
-                    "detection_type": det_type.value,
-                    "threat_level": threat_level.value,
-                    "confidence": round(confidence, 4),
-                    "class": det.get("class", det_type.value),
-                    "evidence_id": db_evidence.id if db_evidence else None,
-                    "timestamp": timestamp.isoformat(),
-                })
+                detection_results.append(
+                    {
+                        "id": db_detection.id,
+                        "detection_type": det_type.value,
+                        "threat_level": threat_level.value,
+                        "confidence": round(confidence, 4),
+                        "class": det.get("class", det_type.value),
+                        "evidence_id": db_evidence.id if db_evidence else None,
+                        "timestamp": timestamp.isoformat(),
+                    }
+                )
                 detections_created += 1
 
             # Sliding window: Conv3D violence needs 15 prior frames (+ current passed above).
@@ -374,10 +407,20 @@ async def process_video(
                 previous_frames.pop(0)
 
         # Audit log for video processing
-        db.add(create_audit_log(
-            request, current_user.id, "process_video", "camera", camera_id,
-            {"filename": video_file.filename, "detections": detections_created, "alerts": alerts_created}
-        ))
+        db.add(
+            create_audit_log(
+                request,
+                current_user.id,
+                "process_video",
+                "camera",
+                camera_id,
+                {
+                    "filename": video_file.filename,
+                    "detections": detections_created,
+                    "alerts": alerts_created,
+                },
+            )
+        )
         db.commit()
 
         return {
@@ -398,21 +441,18 @@ async def process_image(
     camera_id: int,
     image_file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_security_officer)
+    current_user: User = Depends(require_security_officer),
 ):
     """Process a single image through all detection modules."""
     # Verify camera exists
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Camera not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
 
     if camera.company_id and not check_company_access(current_user, camera.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to process image for this camera"
+            detail="Not enough permissions to process image for this camera",
         )
 
     # Read image into OpenCV frame
@@ -421,10 +461,7 @@ async def process_image(
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     if frame is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid image file"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image file")
 
     timestamp = datetime.utcnow()
     detections_created = 0
@@ -438,9 +475,7 @@ async def process_image(
     # Run all detection modules on the single frame
     if "weapon" in enabled_modules:
         w_minc = enabled_modules["weapon"].get("min_confidence")
-        for det in detection_service.detect_weapons(
-            frame, timestamp, min_confidence=w_minc
-        ):
+        for det in detection_service.detect_weapons(frame, timestamp, min_confidence=w_minc):
             all_raw_detections.append((DetectionType.WEAPON, det))
 
     if "violence" in enabled_modules:
@@ -464,10 +499,16 @@ async def process_image(
 
         # Skip if below company's custom min_confidence
         min_conf = module_settings.get("min_confidence")
-        if det_type != DetectionType.CROWD_DENSITY and min_conf is not None and confidence < min_conf:
+        if (
+            det_type != DetectionType.CROWD_DENSITY
+            and min_conf is not None
+            and confidence < min_conf
+        ):
             continue
 
-        threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
+        threat_level = detection_service.classify_threat_level(
+            det_type, confidence, det, module_settings
+        )
         bbox = det.get("bbox", [0, 0, 0, 0])
 
         db_detection = Detection(
@@ -488,8 +529,11 @@ async def process_image(
 
         label = f"{det.get('class', det_type.value)} {confidence:.0%}"
         snapshot_path = video_service.save_snapshot(
-            frame, db_detection.id, prefix=det_type.value,
-            bbox=bbox, label=label,
+            frame,
+            db_detection.id,
+            prefix=det_type.value,
+            bbox=bbox,
+            label=label,
         )
         db_evidence = Evidence(
             detection_id=db_detection.id,
@@ -527,21 +571,33 @@ async def process_image(
             alert.email_sent_at = datetime.utcnow()
             alerts_created += 1
 
-        detection_results.append({
-            "id": db_detection.id,
-            "detection_type": det_type.value,
-            "threat_level": threat_level.value,
-            "confidence": round(confidence, 4),
-            "class": det.get("class", det_type.value),
-            "evidence_id": db_evidence.id if db_evidence else None,
-            "timestamp": timestamp.isoformat(),
-        })
+        detection_results.append(
+            {
+                "id": db_detection.id,
+                "detection_type": det_type.value,
+                "threat_level": threat_level.value,
+                "confidence": round(confidence, 4),
+                "class": det.get("class", det_type.value),
+                "evidence_id": db_evidence.id if db_evidence else None,
+                "timestamp": timestamp.isoformat(),
+            }
+        )
         detections_created += 1
 
-    db.add(create_audit_log(
-        request, current_user.id, "process_image", "camera", camera_id,
-        {"filename": image_file.filename, "detections": detections_created, "alerts": alerts_created}
-    ))
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "process_image",
+            "camera",
+            camera_id,
+            {
+                "filename": image_file.filename,
+                "detections": detections_created,
+                "alerts": alerts_created,
+            },
+        )
+    )
     db.commit()
 
     return {
@@ -577,10 +633,14 @@ async def get_detection_stats(
     if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
         empty = {t.value: 0 for t in DetectionType}
         return {
-            "total_detections": 0, "by_type": empty,
+            "total_detections": 0,
+            "by_type": empty,
             "by_threat_level": {t.value: 0 for t in ThreatLevel},
-            "period_days": days, "critical_threats": 0,
-            "evidence_count": 0, "active_cameras": 0, "ai_modules": 0,
+            "period_days": days,
+            "critical_threats": 0,
+            "evidence_count": 0,
+            "active_cameras": 0,
+            "ai_modules": 0,
         }
 
     start_date = datetime.utcnow() - timedelta(days=days)
@@ -593,14 +653,16 @@ async def get_detection_stats(
     by_type = {t.value: 0 for t in DetectionType}
     for det_type_val, count in (
         det_base.with_entities(Detection.detection_type, func.count(Detection.id))
-                .group_by(Detection.detection_type).all()
+        .group_by(Detection.detection_type)
+        .all()
     ):
         by_type[det_type_val.value] = count
 
     by_threat = {t.value: 0 for t in ThreatLevel}
     for threat_val, count in (
         det_base.with_entities(Detection.threat_level, func.count(Detection.id))
-                .group_by(Detection.threat_level).all()
+        .group_by(Detection.threat_level)
+        .all()
     ):
         by_threat[threat_val.value] = count
 
@@ -616,7 +678,7 @@ async def get_detection_stats(
     evidence_count = ev_query.scalar() or 0
 
     # --- Active cameras count ---
-    cam_query = db.query(func.count(Camera.id)).filter(Camera.is_active == True)
+    cam_query = db.query(func.count(Camera.id)).filter(Camera.is_active is True)
     if company_filter is not None:
         cam_query = cam_query.filter(Camera.company_id == company_filter)
     active_cameras = cam_query.scalar() or 0
@@ -627,19 +689,25 @@ async def get_detection_stats(
     # When viewing all companies (AEGIS_ADMIN, no company_id): count globally enabled modules.
     if company_filter is not None:
         # Modules explicitly enabled at company level
-        company_enabled = db.query(func.count(CompanyDetectionSettings.id)).filter(
-            CompanyDetectionSettings.company_id == company_filter,
-            CompanyDetectionSettings.is_enabled == True,
-        ).scalar() or 0
+        company_enabled = (
+            db.query(func.count(CompanyDetectionSettings.id))
+            .filter(
+                CompanyDetectionSettings.company_id == company_filter,
+                CompanyDetectionSettings.is_enabled is True,
+            )
+            .scalar()
+            or 0
+        )
 
         # Globally enabled modules that the company has NOT overridden
         overridden_modules = [
-            r.module_name for r in db.query(CompanyDetectionSettings.module_name).filter(
-                CompanyDetectionSettings.company_id == company_filter
-            ).all()
+            r.module_name
+            for r in db.query(CompanyDetectionSettings.module_name)
+            .filter(CompanyDetectionSettings.company_id == company_filter)
+            .all()
         ]
         global_fallback_q = db.query(func.count(GlobalModuleSettings.id)).filter(
-            GlobalModuleSettings.is_enabled == True
+            GlobalModuleSettings.is_enabled is True
         )
         if overridden_modules:
             global_fallback_q = global_fallback_q.filter(
@@ -649,9 +717,12 @@ async def get_detection_stats(
         ai_modules = company_enabled + global_fallback
     else:
         # All-companies view: count globally enabled modules
-        ai_modules = db.query(func.count(GlobalModuleSettings.id)).filter(
-            GlobalModuleSettings.is_enabled == True
-        ).scalar() or 0
+        ai_modules = (
+            db.query(func.count(GlobalModuleSettings.id))
+            .filter(GlobalModuleSettings.is_enabled is True)
+            .scalar()
+            or 0
+        )
         # If no global settings exist yet, fall back to total DetectionType count
         if ai_modules == 0 and db.query(func.count(GlobalModuleSettings.id)).scalar() == 0:
             ai_modules = len(DetectionType)
@@ -666,4 +737,3 @@ async def get_detection_stats(
         "active_cameras": active_cameras,
         "ai_modules": ai_modules,
     }
-

@@ -1,15 +1,19 @@
 """
 Video processing service for handling video streams and files.
 """
-import cv2
+
 import logging
+from collections.abc import Generator
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import cv2
 import numpy as np
 
-logger = logging.getLogger(__name__)
-from typing import Generator, Optional, Tuple
-from pathlib import Path
-from datetime import datetime
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class VideoService:
@@ -17,19 +21,21 @@ class VideoService:
 
     # Color mapping per detection type (BGR)
     DETECTION_COLORS = {
-        "weapon": (0, 0, 255),          # Red
-        "mask_face": (0, 165, 255),     # Orange
-        "crowd_density": (255, 255, 0), # Cyan
-        "abandoned_object": (0, 255, 255), # Yellow
-        "violence": (128, 0, 128),      # Purple
+        "weapon": (0, 0, 255),  # Red
+        "mask_face": (0, 165, 255),  # Orange
+        "crowd_density": (255, 255, 0),  # Cyan
+        "abandoned_object": (0, 255, 255),  # Yellow
+        "violence": (128, 0, 128),  # Purple
     }
 
     def __init__(self):
         self.upload_dir = Path(settings.UPLOAD_DIR)
         self.evidence_dir = Path(settings.EVIDENCE_DIR)
         self.processed_dir = Path(settings.PROCESSED_VIDEO_DIR)
-    
-    def read_video_file(self, video_path: str) -> Generator[Tuple[np.ndarray, datetime], None, None]:
+
+    def read_video_file(
+        self, video_path: str
+    ) -> Generator[tuple[np.ndarray, datetime], None, None]:
         """
         Read frames from a video file.
 
@@ -50,6 +56,7 @@ class VideoService:
 
                 # Calculate timestamp relative to video start using FPS
                 from datetime import timedelta
+
                 elapsed = timedelta(seconds=frame_count / fps)
                 timestamp = video_start + elapsed
                 frame_count += 1
@@ -57,29 +64,30 @@ class VideoService:
                 yield frame, timestamp
         finally:
             cap.release()
-    
-    def read_stream(self, stream_url: str) -> Generator[Tuple[np.ndarray, datetime], None, None]:
+
+    def read_stream(self, stream_url: str) -> Generator[tuple[np.ndarray, datetime], None, None]:
         """
         Read frames from a live stream (RTSP, HTTP, etc.).
-        
+
         Yields:
             Tuple of (frame, timestamp)
         """
         cap = cv2.VideoCapture(stream_url)
-        
+
         try:
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     import time
+
                     time.sleep(0.1)  # Wait before retrying
                     continue
-                
+
                 timestamp = datetime.now()
                 yield frame, timestamp
         finally:
             cap.release()
-    
+
     def save_snapshot(
         self,
         frame: np.ndarray,
@@ -109,11 +117,11 @@ class VideoService:
 
             # Color by prefix type
             colors = {
-                "weapon": (0, 0, 255),        # Red
-                "mask_face": (255, 165, 0),    # Orange
-                "crowd_density": (255, 255, 0),# Cyan
-                "abandoned_object": (0, 255, 255), # Yellow
-                "violence": (128, 0, 128),     # Purple
+                "weapon": (0, 0, 255),  # Red
+                "mask_face": (255, 165, 0),  # Orange
+                "crowd_density": (255, 255, 0),  # Cyan
+                "abandoned_object": (0, 255, 255),  # Yellow
+                "violence": (128, 0, 128),  # Purple
             }
             color = colors.get(prefix, (0, 255, 0))
 
@@ -122,10 +130,19 @@ class VideoService:
             if label:
                 font_scale = 0.6
                 thickness = 2
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+                (tw, th), _ = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+                )
                 cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-                cv2.putText(annotated, label, (x1 + 2, y1 - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x1 + 2, y1 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    (255, 255, 255),
+                    thickness,
+                )
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{detection_id}_{timestamp}.jpg"
@@ -133,17 +150,13 @@ class VideoService:
 
         cv2.imwrite(str(filepath), annotated)
         return str(filepath)
-    
+
     def extract_video_clip(
-        self,
-        video_path: str,
-        start_frame: int,
-        end_frame: int,
-        output_path: str
+        self, video_path: str, start_frame: int, end_frame: int, output_path: str
     ) -> bool:
         """
         Extract a video clip from a larger video file.
-        
+
         Returns:
             True if successful
         """
@@ -152,25 +165,24 @@ class VideoService:
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-            
+
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            
+
             for _ in range(start_frame, end_frame + 1):
                 ret, frame = cap.read()
                 if not ret:
                     break
                 out.write(frame)
-            
+
             cap.release()
             out.release()
             return True
         except Exception as e:
             print(f"Error extracting video clip: {e}")
             return False
-
 
     def get_video_info(self, video_path: str) -> dict:
         """Get video metadata: total frames, fps, width, height, duration."""
@@ -214,10 +226,26 @@ class VideoService:
                 # Draw background box for text
                 cv2.rectangle(annotated, (10, 10), (300, 90), (0, 0, 0), -1)
                 cv2.rectangle(annotated, (10, 10), (300, 90), (0, 255, 255), 2)
-                cv2.putText(annotated, f"People: {count}", (20, 45),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(annotated, f"Density: {int(density_val * 100)}%", (20, 80),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(
+                    annotated,
+                    f"People: {count}",
+                    (20, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    annotated,
+                    f"Density: {int(density_val * 100)}%",
+                    (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
                 break  # only one crowd_density per frame
 
         # Draw bounding boxes for non-crowd detections
@@ -248,13 +276,16 @@ class VideoService:
             label = f"{class_name} {confidence:.0%}"
             font_scale = 0.6
             thickness = 2
-            (tw, th), _ = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-            )
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
             cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
             cv2.putText(
-                annotated, label, (x1 + 2, y1 - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness,
+                annotated,
+                label,
+                (x1 + 2, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (255, 255, 255),
+                thickness,
             )
 
             # Draw tracking line from bottom-center of bbox to bottom of frame
@@ -264,26 +295,29 @@ class VideoService:
         return annotated
 
     def generate_crowd_heatmap(
-        self, frame: np.ndarray, density_map_normalized: Optional[np.ndarray],
-        count: int = 0, density: float = 0.0
+        self,
+        frame: np.ndarray,
+        density_map_normalized: Optional[np.ndarray],
+        count: int = 0,
+        density: float = 0.0,
     ) -> Optional[np.ndarray]:
         """
         Generate a crowd density heatmap overlay from normalized density map.
-        
+
         Args:
             frame: original frame (for resizing density map)
             density_map_normalized: (height, width) normalized density map (0-255)
             count: person count to display
             density: density ratio to display
-        
+
         Returns:
             (frame_h, frame_w, 3) BGR heatmap overlay or None if input invalid
         """
         if density_map_normalized is None:
             return None
-        
+
         h, w = frame.shape[:2]
-        
+
         # Resize density map to match frame size (LINEAR matches SANet notebook resize)
         if density_map_normalized.shape != (h, w):
             density_resized = cv2.resize(
@@ -300,22 +334,22 @@ class VideoService:
             "viridis": cv2.COLORMAP_VIRIDIS,
         }.get(cmap_name, cv2.COLORMAP_JET)
         heatmap_colored = cv2.applyColorMap(density_resized, cmap)
-        
+
         # Add text overlay with crowd count and density percentage
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 1.2
         thickness = 2
         color = (255, 255, 255)  # White text
-        
+
         # Count label
         count_text = f"People: {count}"
         cv2.putText(heatmap_colored, count_text, (20, 50), font, font_scale, color, thickness)
-        
+
         # Density percentage label
         density_percent = min(100, int(density * 100))
         density_text = f"Density: {density_percent}%"
         cv2.putText(heatmap_colored, density_text, (20, 100), font, font_scale, color, thickness)
-        
+
         return heatmap_colored
 
     def create_video_writer(self, output_path: str, fps: float, width: int, height: int):
@@ -328,15 +362,16 @@ class VideoService:
         Re-encode an mp4v video to H.264 so browsers can play it inline.
         Replaces the original file. Returns the final path.
         """
-        import subprocess
-        import shutil
         import os
+        import shutil
+        import subprocess
 
         # Find ffmpeg: system install or bundled via imageio-ffmpeg
         ffmpeg_bin = shutil.which("ffmpeg")
         if not ffmpeg_bin:
             try:
                 import imageio_ffmpeg
+
                 ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
             except (ImportError, Exception):
                 ffmpeg_bin = None
@@ -349,14 +384,21 @@ class VideoService:
         try:
             subprocess.run(
                 [
-                    ffmpeg_bin, "-y",
-                    "-i", input_path,
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "23",
-                    "-pix_fmt", "yuv420p",        # maximum browser compat
-                    "-movflags", "+faststart",     # enables streaming/seeking
-                    "-an",                         # no audio track
+                    ffmpeg_bin,
+                    "-y",
+                    "-i",
+                    input_path,
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",  # maximum browser compat
+                    "-movflags",
+                    "+faststart",  # enables streaming/seeking
+                    "-an",  # no audio track
                     temp_path,
                 ],
                 check=True,
@@ -375,4 +417,3 @@ class VideoService:
 
 
 video_service = VideoService()
-
