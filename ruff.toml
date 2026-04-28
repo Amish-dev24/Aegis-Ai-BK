@@ -1,0 +1,24 @@
+# Ruff configuration for Aegis AI backend
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "B008",  # do not perform function calls in default args (FastAPI Depends pattern)
+    "B904",  # raise ... from err — too noisy for existing code
+    "UP007", # Use X | Y for type hints — requires Python 3.10+
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F401", "E402"]   # unused imports and module-level imports ok in test files
+"scripts/*" = ["T201"]         # print() is fine in utility scripts
+"alembic/*" = ["F401", "E402"]
