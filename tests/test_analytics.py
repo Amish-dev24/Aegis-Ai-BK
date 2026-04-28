@@ -8,6 +8,7 @@ Tests for analytics endpoints:
 
 All endpoints require authentication and respect company-level isolation.
 """
+
 import pytest
 
 BASE = "/api/v1/analytics"

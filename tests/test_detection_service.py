@@ -9,21 +9,24 @@ The DetectionService singleton is imported from the already-initialised
 module-level instance.  Because model files point to non-existent paths
 (set in conftest), all model references are None — no inference occurs.
 """
+
 import pytest
 
 from app.models.detection import DetectionType, ThreatLevel
 
-
 # ── Fixture: reuse the module-level singleton (models are all None) ──────────
+
 
 @pytest.fixture(scope="module")
 def svc():
     """Return the already-initialised DetectionService singleton."""
     from app.services.detection_service import detection_service
+
     return detection_service
 
 
 # ── classify_threat_level — Weapon ───────────────────────────────────────────
+
 
 class TestWeaponThreatLevels:
     def test_weapon_critical(self, svc):
@@ -50,6 +53,7 @@ class TestWeaponThreatLevels:
 
 # ── classify_threat_level — Violence ─────────────────────────────────────────
 
+
 class TestViolenceThreatLevels:
     def test_violence_critical(self, svc):
         lvl = svc.classify_threat_level(DetectionType.VIOLENCE, confidence=0.85)
@@ -69,6 +73,7 @@ class TestViolenceThreatLevels:
 
 
 # ── classify_threat_level — Abandoned Object ─────────────────────────────────
+
 
 class TestAbandonedObjectThreatLevels:
     def test_no_critical_for_abandoned(self, svc):
@@ -91,6 +96,7 @@ class TestAbandonedObjectThreatLevels:
 
 # ── classify_threat_level — Mask / Face ──────────────────────────────────────
 
+
 class TestMaskFaceThreatLevels:
     def test_max_level_is_medium(self, svc):
         """Mask/face detections are capped at MEDIUM, never HIGH or CRITICAL."""
@@ -108,10 +114,12 @@ class TestMaskFaceThreatLevels:
 
 # ── classify_threat_level — Crowd Density ────────────────────────────────────
 
+
 class TestCrowdDensityThreatLevels:
     def test_crowd_low_count(self, svc):
         lvl = svc.classify_threat_level(
-            DetectionType.CROWD_DENSITY, confidence=0.5,
+            DetectionType.CROWD_DENSITY,
+            confidence=0.5,
             metadata={"count": 5, "density": 0.05},
         )
         assert lvl == ThreatLevel.LOW
@@ -119,20 +127,23 @@ class TestCrowdDensityThreatLevels:
     def test_crowd_high_count(self, svc):
         """count=95 out of scale=100 should be HIGH."""
         lvl = svc.classify_threat_level(
-            DetectionType.CROWD_DENSITY, confidence=0.95,
+            DetectionType.CROWD_DENSITY,
+            confidence=0.95,
             metadata={"count": 95, "density": 0.95},
         )
         assert lvl in (ThreatLevel.HIGH, ThreatLevel.CRITICAL)
 
     def test_crowd_zero_count_is_low(self, svc):
         lvl = svc.classify_threat_level(
-            DetectionType.CROWD_DENSITY, confidence=0.0,
+            DetectionType.CROWD_DENSITY,
+            confidence=0.0,
             metadata={"count": 0, "density": 0.0},
         )
         assert lvl == ThreatLevel.LOW
 
 
 # ── classify_threat_level — Company threshold overrides ──────────────────────
+
 
 class TestCompanyThresholdOverrides:
     def test_company_lower_critical_threshold(self, svc):
@@ -143,7 +154,8 @@ class TestCompanyThresholdOverrides:
             "medium_threshold": 0.2,
         }
         lvl = svc.classify_threat_level(
-            DetectionType.WEAPON, confidence=0.65,
+            DetectionType.WEAPON,
+            confidence=0.65,
             company_thresholds=company_thresholds,
         )
         assert lvl == ThreatLevel.CRITICAL
@@ -156,16 +168,19 @@ class TestCompanyThresholdOverrides:
             "medium_threshold": None,
         }
         lvl_override = svc.classify_threat_level(
-            DetectionType.WEAPON, confidence=0.95,
+            DetectionType.WEAPON,
+            confidence=0.95,
             company_thresholds=company_thresholds,
         )
         lvl_default = svc.classify_threat_level(
-            DetectionType.WEAPON, confidence=0.95,
+            DetectionType.WEAPON,
+            confidence=0.95,
         )
         assert lvl_override == lvl_default
 
 
 # ── DEFAULT_THRESHOLDS sanity check ──────────────────────────────────────────
+
 
 class TestDefaultThresholds:
     def test_all_detection_types_have_entry(self, svc):

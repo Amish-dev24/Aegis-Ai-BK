@@ -1,13 +1,16 @@
 """
 Pydantic schemas for company management.
 """
-from pydantic import BaseModel, EmailStr
+
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
+
+from pydantic import BaseModel, EmailStr
 
 
 class CompanyBase(BaseModel):
     """Base company schema."""
+
     name: str
     domain: Optional[str] = None
     contact_email: Optional[EmailStr] = None
@@ -16,11 +19,13 @@ class CompanyBase(BaseModel):
 
 class CompanyCreate(CompanyBase):
     """Schema for creating a company."""
+
     pass
 
 
 class CompanyUpdate(BaseModel):
     """Schema for updating a company."""
+
     name: Optional[str] = None
     domain: Optional[str] = None
     contact_email: Optional[EmailStr] = None
@@ -31,24 +36,27 @@ class CompanyUpdate(BaseModel):
 
 class CompanyResponse(CompanyBase):
     """Schema for company response."""
+
     id: int
     is_active: bool
     is_verified: bool
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
 
 class CompanyWithUsers(CompanyResponse):
     """Company response with user count."""
+
     user_count: int
     active_user_count: int
 
 
 class CompanyStats(BaseModel):
     """Company statistics for Aegis AI admin."""
+
     company_id: int
     company_name: str
     total_users: int
@@ -58,4 +66,3 @@ class CompanyStats(BaseModel):
     total_detections: int
     total_alerts: int
     last_activity: Optional[datetime] = None
-

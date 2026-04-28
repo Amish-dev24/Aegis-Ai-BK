@@ -1,8 +1,24 @@
 """
 API v1 routes aggregation.
 """
+
 from fastapi import APIRouter
-from app.api.v1 import auth, users, cameras, detections, alerts, evidence, analytics, companies, audit_logs, detection_settings, video_processing, retention, emergency_contacts
+
+from app.api.v1 import (
+    alerts,
+    analytics,
+    audit_logs,
+    auth,
+    cameras,
+    companies,
+    detection_settings,
+    detections,
+    emergency_contacts,
+    evidence,
+    retention,
+    users,
+    video_processing,
+)
 
 api_router = APIRouter()
 

@@ -1,13 +1,16 @@
 """
 Pydantic schemas for evidence management.
 """
-from pydantic import BaseModel
+
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel
 
 
 class EvidenceBase(BaseModel):
     """Base evidence schema."""
+
     detection_id: int
     image_path: str
     video_path: Optional[str] = None
@@ -17,11 +20,13 @@ class EvidenceBase(BaseModel):
 
 class EvidenceCreate(EvidenceBase):
     """Schema for creating evidence."""
+
     pass
 
 
 class EvidenceResponse(BaseModel):
     """Schema for evidence response with detection context."""
+
     id: int
     detection_id: int
     image_path: str

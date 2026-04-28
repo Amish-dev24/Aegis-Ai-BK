@@ -1,14 +1,18 @@
 """
 Pydantic schemas for user management.
 """
-from pydantic import BaseModel, EmailStr
+
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel, EmailStr
+
 from app.models.user import Role
 
 
 class UserBase(BaseModel):
     """Base user schema."""
+
     username: str
     email: EmailStr
     full_name: Optional[str] = None
@@ -19,6 +23,7 @@ class UserBase(BaseModel):
 
 class UserSignup(BaseModel):
     """Schema for public signup (no login required)."""
+
     username: str
     email: EmailStr
     password: str
@@ -30,12 +35,14 @@ class UserSignup(BaseModel):
 
 class UserCreate(UserBase):
     """Schema for creating a user (admin only)."""
+
     password: str
     company_id: Optional[int] = None
 
 
 class UserUpdate(BaseModel):
     """Schema for updating a user."""
+
     email: Optional[EmailStr] = None
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
@@ -51,6 +58,7 @@ class UserUpdate(BaseModel):
 
 class UserResponse(UserBase):
     """Schema for user response."""
+
     id: int
     company_id: Optional[int] = None
     is_active: bool
@@ -68,6 +76,7 @@ class UserResponse(UserBase):
 
 class Token(BaseModel):
     """Token response schema."""
+
     access_token: str
     refresh_token: str
     token_type: str
@@ -75,5 +84,5 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     """Token data schema."""
-    username: Optional[str] = None
 
+    username: Optional[str] = None

@@ -1,12 +1,14 @@
 """
 Pydantic schemas for detection module settings.
 """
-from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime
 
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel
 
 # ── Global Module Settings (Aegis Admin) ──
+
 
 class GlobalModuleSettingsResponse(BaseModel):
     id: int
@@ -23,6 +25,7 @@ class GlobalModuleSettingsUpdate(BaseModel):
 
 
 # ── Company Detection Settings ──
+
 
 class CompanyDetectionSettingsCreate(BaseModel):
     module_name: str

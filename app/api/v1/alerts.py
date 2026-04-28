@@ -1,32 +1,46 @@
 """
 Alert management endpoints with enriched views, filters, evidence images, and incident logs.
 """
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.core.security import require_any_authenticated, require_security_officer, get_user_company_filter, check_company_access
-from app.schemas.alert import (
-    AlertCreate, AlertResponse, AlertDetailResponse, AlertUpdate,
-    AlertLogCreate, AlertLogResponse,
-)
-from app.models.alert import Alert, AlertStatus
-from app.models.alert_log import AlertLog
-from app.models.detection import Detection, DetectionType, ThreatLevel
-from app.models.camera import Camera
-from app.models.evidence import Evidence
-from app.models.user import User, Role
-from app.services.email_service import email_service
-from app.models.audit_log import create_audit_log
+
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy.orm import Session
+
+from app.core.security import (
+    check_company_access,
+    get_user_company_filter,
+    require_any_authenticated,
+    require_security_officer,
+)
+from app.database import get_db
+from app.models.alert import Alert, AlertStatus
+from app.models.alert_log import AlertLog
+from app.models.audit_log import create_audit_log
+from app.models.camera import Camera
+from app.models.detection import Detection, DetectionType, ThreatLevel
+from app.models.evidence import Evidence
+from app.models.user import Role, User
+from app.schemas.alert import (
+    AlertCreate,
+    AlertDetailResponse,
+    AlertLogCreate,
+    AlertLogResponse,
+    AlertResponse,
+    AlertUpdate,
+)
+from app.services.email_service import email_service
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
 def _build_log_responses(alert: Alert, db: Session) -> list:
     """Build log responses with usernames (single batched query — no N+1)."""
-    logs = db.query(AlertLog).filter(AlertLog.alert_id == alert.id).order_by(AlertLog.created_at).all()
+    logs = (
+        db.query(AlertLog).filter(AlertLog.alert_id == alert.id).order_by(AlertLog.created_at).all()
+    )
     if not logs:
         return []
     # Batch-load all referenced users in one query
@@ -49,7 +63,13 @@ def _build_log_responses(alert: Alert, db: Session) -> list:
     ]
 
 
-def _enrich_alert(alert: Alert, detection: Detection = None, camera: Camera = None, evidence: Evidence = None, logs: list = None) -> AlertDetailResponse:
+def _enrich_alert(
+    alert: Alert,
+    detection: Detection = None,
+    camera: Camera = None,
+    evidence: Evidence = None,
+    logs: list = None,
+) -> AlertDetailResponse:
     """Build enriched alert with detection context, camera info, evidence image, and logs."""
     image_url = None
     if evidence and evidence.image_path:
@@ -95,7 +115,7 @@ async def create_alert(
     request: Request,
     alert_data: AlertCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_security_officer)
+    current_user: User = Depends(require_security_officer),
 ):
     """Create an alert. Company users can only create alerts for their company's detections."""
     detection = db.query(Detection).filter(Detection.id == alert_data.detection_id).first()
@@ -127,18 +147,24 @@ async def create_alert(
                 "Detection Type": detection.detection_type.value,
                 "Threat Level": detection.threat_level.value,
                 "Confidence": f"{detection.confidence:.2%}",
-                "Timestamp": detection.frame_timestamp.isoformat()
-            }
+                "Timestamp": detection.frame_timestamp.isoformat(),
+            },
         )
         db_alert.email_sent = True
         db_alert.email_sent_to = current_user.email
         db_alert.email_sent_at = datetime.utcnow()
         db.commit()
 
-    db.add(create_audit_log(
-        request, current_user.id, "create_alert", "alert", db_alert.id,
-        {"detection_id": detection.id, "title": db_alert.title}
-    ))
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "create_alert",
+            "alert",
+            db_alert.id,
+            {"detection_id": detection.id, "title": db_alert.title},
+        )
+    )
     db.commit()
 
     return db_alert
@@ -147,10 +173,12 @@ async def create_alert(
 # ---------------------------------------------------------------------------
 # GET /alerts  —  list with filters + enriched response
 # ---------------------------------------------------------------------------
-@router.get("", response_model=List[AlertDetailResponse])
+@router.get("", response_model=list[AlertDetailResponse])
 async def list_alerts(
     request: Request,
-    status_filter: Optional[AlertStatus] = Query(None, alias="status", description="Filter by alert status"),
+    status_filter: Optional[AlertStatus] = Query(
+        None, alias="status", description="Filter by alert status"
+    ),
     threat_level: Optional[ThreatLevel] = Query(None, description="Filter by threat level"),
     detection_type: Optional[DetectionType] = Query(None, description="Filter by detection type"),
     camera_id: Optional[int] = Query(None, description="Filter by camera"),
@@ -167,10 +195,10 @@ async def list_alerts(
     if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
         return []
 
-    query = db.query(Alert, Detection, Camera).join(
-        Detection, Alert.detection_id == Detection.id
-    ).join(
-        Camera, Detection.camera_id == Camera.id
+    query = (
+        db.query(Alert, Detection, Camera)
+        .join(Detection, Alert.detection_id == Detection.id)
+        .join(Camera, Detection.camera_id == Camera.id)
     )
     if company_filter is not None:
         query = query.filter(Alert.company_id == company_filter)
@@ -213,7 +241,7 @@ async def get_alert(
     alert_id: int,
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any_authenticated)
+    current_user: User = Depends(require_any_authenticated),
 ):
     """Get alert by ID with detection context, camera info, evidence image, and incident logs."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -224,7 +252,9 @@ async def get_alert(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
 
     detection = db.query(Detection).filter(Detection.id == alert.detection_id).first()
-    camera = db.query(Camera).filter(Camera.id == detection.camera_id).first() if detection else None
+    camera = (
+        db.query(Camera).filter(Camera.id == detection.camera_id).first() if detection else None
+    )
     evidence = db.query(Evidence).filter(Evidence.detection_id == alert.detection_id).first()
     logs = _build_log_responses(alert, db)
 
@@ -234,7 +264,9 @@ async def get_alert(
 # ---------------------------------------------------------------------------
 # POST /alerts/{alert_id}/log  —  add incident log entry
 # ---------------------------------------------------------------------------
-@router.post("/{alert_id}/log", response_model=AlertLogResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{alert_id}/log", response_model=AlertLogResponse, status_code=status.HTTP_201_CREATED
+)
 async def add_alert_log(
     request: Request,
     alert_id: int,
@@ -258,10 +290,16 @@ async def add_alert_log(
     )
     db.add(log_entry)
 
-    db.add(create_audit_log(
-        request, current_user.id, "add_alert_log", "alert", alert_id,
-        {"action": log_data.action, "message": log_data.message}
-    ))
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "add_alert_log",
+            "alert",
+            alert_id,
+            {"action": log_data.action, "message": log_data.message},
+        )
+    )
     db.commit()
     db.refresh(log_entry)
 
@@ -279,7 +317,7 @@ async def add_alert_log(
 # ---------------------------------------------------------------------------
 # GET /alerts/{alert_id}/logs  —  list all logs for an alert
 # ---------------------------------------------------------------------------
-@router.get("/{alert_id}/logs", response_model=List[AlertLogResponse])
+@router.get("/{alert_id}/logs", response_model=list[AlertLogResponse])
 async def list_alert_logs(
     alert_id: int,
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
@@ -306,7 +344,7 @@ async def update_alert(
     alert_id: int,
     alert_update: AlertUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_security_officer)
+    current_user: User = Depends(require_security_officer),
 ):
     """Update alert status."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -338,10 +376,16 @@ async def update_alert(
         )
         db.add(auto_log)
 
-    db.add(create_audit_log(
-        request, current_user.id, "update_alert", "alert", alert.id,
-        {"new_status": alert.status.value}
-    ))
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "update_alert",
+            "alert",
+            alert.id,
+            {"new_status": alert.status.value},
+        )
+    )
     db.commit()
     db.refresh(alert)
 
@@ -356,7 +400,7 @@ async def acknowledge_alert(
     request: Request,
     alert_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_security_officer)
+    current_user: User = Depends(require_security_officer),
 ):
     """Acknowledge an alert."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -379,10 +423,16 @@ async def acknowledge_alert(
     )
     db.add(auto_log)
 
-    db.add(create_audit_log(
-        request, current_user.id, "acknowledge_alert", "alert", alert.id,
-        {"title": alert.title, "acknowledged_by": current_user.username}
-    ))
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "acknowledge_alert",
+            "alert",
+            alert.id,
+            {"title": alert.title, "acknowledged_by": current_user.username},
+        )
+    )
     db.commit()
     db.refresh(alert)
 

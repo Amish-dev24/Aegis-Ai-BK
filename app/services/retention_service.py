@@ -4,17 +4,18 @@ Data retention service — auto-cleanup of old detections, evidence, alerts, and
 Implements the data retention policy from Section 9 of the proposal:
 "Define retention period (e.g., 30-90 days) after which evidence is archived or deleted."
 """
-import os
+
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models.detection import Detection
-from app.models.evidence import Evidence
 from app.models.alert import Alert
 from app.models.alert_log import AlertLog
+from app.models.detection import Detection
+from app.models.evidence import Evidence
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,11 @@ def run_retention_cleanup(db: Session, retention_days: int = None) -> dict:
         return {"message": "Data retention disabled (0 days)", "deleted": {}}
 
     cutoff = datetime.utcnow() - timedelta(days=retention_days)
-    logger.info("Retention cleanup: deleting data older than %s (%d days)", cutoff.isoformat(), retention_days)
+    logger.info(
+        "Retention cleanup: deleting data older than %s (%d days)",
+        cutoff.isoformat(),
+        retention_days,
+    )
 
     stats = {
         "retention_days": retention_days,
@@ -58,12 +63,18 @@ def run_retention_cleanup(db: Session, retention_days: int = None) -> dict:
     old_alert_ids = [a.id for a in old_alerts]
 
     if old_alert_ids:
-        log_count = db.query(AlertLog).filter(AlertLog.alert_id.in_(old_alert_ids)).delete(synchronize_session=False)
+        log_count = (
+            db.query(AlertLog)
+            .filter(AlertLog.alert_id.in_(old_alert_ids))
+            .delete(synchronize_session=False)
+        )
         stats["alert_logs_deleted"] = log_count
 
     # 3. Delete old alerts
     if old_alert_ids:
-        alert_count = db.query(Alert).filter(Alert.id.in_(old_alert_ids)).delete(synchronize_session=False)
+        alert_count = (
+            db.query(Alert).filter(Alert.id.in_(old_alert_ids)).delete(synchronize_session=False)
+        )
         stats["alerts_deleted"] = alert_count
 
     # 4. Delete evidence records + files
@@ -80,12 +91,20 @@ def run_retention_cleanup(db: Session, retention_days: int = None) -> dict:
             except Exception as e:
                 logger.warning("Failed to delete evidence file %s: %s", ev.image_path, e)
 
-    evidence_count = db.query(Evidence).filter(Evidence.detection_id.in_(old_detection_ids)).delete(synchronize_session=False)
+    evidence_count = (
+        db.query(Evidence)
+        .filter(Evidence.detection_id.in_(old_detection_ids))
+        .delete(synchronize_session=False)
+    )
     stats["evidence_deleted"] = evidence_count
     stats["evidence_files_deleted"] = files_deleted
 
     # 5. Delete old detections
-    detection_count = db.query(Detection).filter(Detection.id.in_(old_detection_ids)).delete(synchronize_session=False)
+    detection_count = (
+        db.query(Detection)
+        .filter(Detection.id.in_(old_detection_ids))
+        .delete(synchronize_session=False)
+    )
     stats["detections_deleted"] = detection_count
 
     # 6. Clean up old processed videos
@@ -103,11 +122,16 @@ def run_retention_cleanup(db: Session, retention_days: int = None) -> dict:
 
     db.commit()
 
-    total = (stats["detections_deleted"] + stats["alerts_deleted"] +
-             stats["evidence_deleted"] + stats["alert_logs_deleted"])
+    total = (
+        stats["detections_deleted"]
+        + stats["alerts_deleted"]
+        + stats["evidence_deleted"]
+        + stats["alert_logs_deleted"]
+    )
     logger.info(
         "Retention cleanup complete: %d records deleted, %d files removed",
-        total, stats["evidence_files_deleted"] + stats["processed_videos_deleted"]
+        total,
+        stats["evidence_files_deleted"] + stats["processed_videos_deleted"],
     )
 
     return {
