@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.security import (
     check_company_access,
     get_user_company_filter,
@@ -343,8 +344,16 @@ async def process_video(
 
                 # Save evidence snapshot with bounding box drawn
                 label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+                face_boxes = (
+                    detection_service.collect_face_bboxes_normalized(frame)
+                    if getattr(settings, "PRIVACY_BLUR_NON_SUBJECT_FACES", True)
+                    else []
+                )
+                snap_frame = video_service.privacy_blur_for_snapshot(
+                    frame, det_type.value, bbox, face_boxes
+                )
                 snapshot_path = video_service.save_snapshot(
-                    frame,
+                    snap_frame,
                     db_detection.id,
                     prefix=det_type.value,
                     bbox=bbox,
@@ -528,8 +537,16 @@ async def process_image(
         db.flush()
 
         label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+        face_boxes = (
+            detection_service.collect_face_bboxes_normalized(frame)
+            if getattr(settings, "PRIVACY_BLUR_NON_SUBJECT_FACES", True)
+            else []
+        )
+        snap_frame = video_service.privacy_blur_for_snapshot(
+            frame, det_type.value, bbox, face_boxes
+        )
         snapshot_path = video_service.save_snapshot(
-            frame,
+            snap_frame,
             db_detection.id,
             prefix=det_type.value,
             bbox=bbox,
@@ -678,7 +695,7 @@ async def get_detection_stats(
     evidence_count = ev_query.scalar() or 0
 
     # --- Active cameras count ---
-    cam_query = db.query(func.count(Camera.id)).filter(Camera.is_active is True)
+    cam_query = db.query(func.count(Camera.id)).filter(Camera.is_active.is_(True))
     if company_filter is not None:
         cam_query = cam_query.filter(Camera.company_id == company_filter)
     active_cameras = cam_query.scalar() or 0
@@ -693,7 +710,7 @@ async def get_detection_stats(
             db.query(func.count(CompanyDetectionSettings.id))
             .filter(
                 CompanyDetectionSettings.company_id == company_filter,
-                CompanyDetectionSettings.is_enabled is True,
+                CompanyDetectionSettings.is_enabled.is_(True),
             )
             .scalar()
             or 0
@@ -707,7 +724,7 @@ async def get_detection_stats(
             .all()
         ]
         global_fallback_q = db.query(func.count(GlobalModuleSettings.id)).filter(
-            GlobalModuleSettings.is_enabled is True
+            GlobalModuleSettings.is_enabled.is_(True)
         )
         if overridden_modules:
             global_fallback_q = global_fallback_q.filter(
@@ -719,7 +736,7 @@ async def get_detection_stats(
         # All-companies view: count globally enabled modules
         ai_modules = (
             db.query(func.count(GlobalModuleSettings.id))
-            .filter(GlobalModuleSettings.is_enabled is True)
+            .filter(GlobalModuleSettings.is_enabled.is_(True))
             .scalar()
             or 0
         )

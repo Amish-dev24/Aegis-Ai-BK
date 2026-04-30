@@ -197,6 +197,109 @@ class VideoService:
         cap.release()
         return info
 
+    @staticmethod
+    def iou_normalized(a: list[float], b: list[float]) -> float:
+        """IoU for boxes as [x, y, w, h] in 0–1 normalized coordinates."""
+        if len(a) < 4 or len(b) < 4:
+            return 0.0
+        ax2, ay2 = a[0] + a[2], a[1] + a[3]
+        bx2, by2 = b[0] + b[2], b[1] + b[3]
+        ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        ua = a[2] * a[3] + b[2] * b[3] - inter
+        return inter / ua if ua > 0 else 0.0
+
+    def blur_faces_except(
+        self,
+        frame: np.ndarray,
+        preserve_normalized: list[list[float]],
+        face_boxes_normalized: list[list[float]],
+        blur_ksize: int = 51,
+        iou_keep: float = 0.12,
+    ) -> np.ndarray:
+        """
+        Gaussian-blur each face region except those overlapping ``preserve_normalized``
+        (subject faces / detections to keep sharp).
+        """
+        if not face_boxes_normalized:
+            return frame
+        out = frame.copy()
+        h, w = out.shape[:2]
+        k = blur_ksize if blur_ksize % 2 == 1 else blur_ksize + 1
+        k = max(3, k)
+        for fb in face_boxes_normalized:
+            if len(fb) < 4:
+                continue
+            skip = False
+            for pb in preserve_normalized:
+                if len(pb) < 4:
+                    continue
+                if self.iou_normalized(fb, pb) >= iou_keep:
+                    skip = True
+                    break
+            if skip:
+                continue
+            x1 = int(max(0, fb[0] * w))
+            y1 = int(max(0, fb[1] * h))
+            x2 = int(min(w, (fb[0] + fb[2]) * w))
+            y2 = int(min(h, (fb[1] + fb[3]) * h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            roi = out[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            out[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (k, k), 0)
+        return out
+
+    def privacy_blur_for_snapshot(
+        self,
+        frame: np.ndarray,
+        det_type_value: str,
+        subject_bbox: Optional[list] = None,
+        face_boxes_normalized: Optional[list[list[float]]] = None,
+    ) -> np.ndarray:
+        """Blur faces except the subject; for ``mask_face``, keep the detection bbox sharp."""
+        if not getattr(settings, "PRIVACY_BLUR_NON_SUBJECT_FACES", True):
+            return frame
+        faces = face_boxes_normalized or []
+        if not faces:
+            return frame
+        preserve: list[list[float]] = []
+        bb = subject_bbox or []
+        if det_type_value == "mask_face" and len(bb) >= 4 and float(bb[2]) > 0 and float(bb[3]) > 0:
+            preserve = [bb]
+        return self.blur_faces_except(
+            frame,
+            preserve,
+            faces,
+            blur_ksize=int(getattr(settings, "PRIVACY_FACE_BLUR_KSIZE", 51)),
+            iou_keep=float(getattr(settings, "PRIVACY_FACE_IOU_KEEP", 0.12)),
+        )
+
+    def privacy_blur_for_video_frame(
+        self,
+        frame: np.ndarray,
+        preserve_mask_face_bboxes: list[list[float]],
+        face_boxes_normalized: Optional[list[list[float]]] = None,
+    ) -> np.ndarray:
+        """Blur all faces except those overlapping mask_face detection boxes on this frame."""
+        if not getattr(settings, "PRIVACY_BLUR_IN_VIDEO_OUTPUT", True):
+            return frame
+        faces = face_boxes_normalized or []
+        if not faces:
+            return frame
+        return self.blur_faces_except(
+            frame,
+            preserve_mask_face_bboxes,
+            faces,
+            blur_ksize=int(getattr(settings, "PRIVACY_FACE_BLUR_KSIZE", 51)),
+            iou_keep=float(getattr(settings, "PRIVACY_FACE_IOU_KEEP", 0.12)),
+        )
+
     def draw_detections_on_frame(
         self, frame: np.ndarray, detections: list, heatmap_overlay: Optional[np.ndarray] = None
     ) -> np.ndarray:
@@ -258,6 +361,8 @@ class VideoService:
 
             bbox = det.get("bbox", [])
             if not bbox or len(bbox) < 4:
+                continue
+            if float(bbox[2]) < 1e-6 or float(bbox[3]) < 1e-6:
                 continue
 
             x1 = int(bbox[0] * w)

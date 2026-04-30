@@ -497,8 +497,16 @@ def _run_analysis(
         save_crowd_evidence = bool(getattr(settings, "CROWD_SAVE_EVIDENCE", False))
         if det_type != DetectionType.CROWD_DENSITY or save_crowd_evidence:
             label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+            face_boxes = (
+                detection_service.collect_face_bboxes_normalized(full_frame)
+                if getattr(settings, "PRIVACY_BLUR_NON_SUBJECT_FACES", True)
+                else []
+            )
+            snap_frame = video_service.privacy_blur_for_snapshot(
+                full_frame, det_type.value, bbox, face_boxes
+            )
             snapshot_path = video_service.save_snapshot(
-                full_frame,
+                snap_frame,
                 db_detection.id,
                 prefix=det_type.value,
                 bbox=bbox,
@@ -719,12 +727,27 @@ def _process_video_sync(job_id: str):
                         pending_db_count = job.get("_pdb", 0)
 
                     if writer:
+                        base_for_draw = frame
+                        if getattr(settings, "PRIVACY_BLUR_IN_VIDEO_OUTPUT", True):
+                            vf_faces = detection_service.collect_face_bboxes_normalized(frame)
+                            preserve_mf: list[list[float]] = []
+                            for d in active_detections or []:
+                                if d.get("det_type") != "mask_face":
+                                    continue
+                                bb = d.get("bbox") or []
+                                if len(bb) >= 4 and float(bb[2]) > 0 and float(bb[3]) > 0:
+                                    preserve_mf.append(bb)
+                            base_for_draw = video_service.privacy_blur_for_video_frame(
+                                frame, preserve_mf, vf_faces
+                            )
                         if active_detections:
                             annotated = video_service.draw_detections_on_frame(
-                                frame, active_detections, heatmap_overlay=heatmap_overlay
+                                base_for_draw,
+                                active_detections,
+                                heatmap_overlay=heatmap_overlay,
                             )
                         else:
-                            annotated = frame
+                            annotated = base_for_draw
                             # Still apply heatmap if available (even without other detections)
                             if heatmap_overlay is not None:
                                 fw = _crowd_heatmap_frame_weight()
@@ -738,11 +761,11 @@ def _process_video_sync(job_id: str):
                             if heatmap_overlay is not None:
                                 fw = _crowd_heatmap_frame_weight()
                                 heatmap_frame = cv2.addWeighted(
-                                    frame, fw, heatmap_overlay, 1.0 - fw, 0
+                                    base_for_draw, fw, heatmap_overlay, 1.0 - fw, 0
                                 )
                             else:
                                 # Write plain frame if no heatmap available yet
-                                heatmap_frame = frame
+                                heatmap_frame = base_for_draw
                             heatmap_writer.write(heatmap_frame)
 
                     job["current_frame"] = frame_index

@@ -91,10 +91,14 @@ class TestListCameras:
         resp = client.get(BASE)
         assert resp.status_code == 401
 
-    def test_active_only_filter(self, client, officer_headers):
+    def test_active_only_filter(self, client, officer_headers, test_camera):
         resp = client.get(f"{BASE}?active_only=true", headers=officer_headers)
         assert resp.status_code == 200
-        for cam in resp.json():
+        payload = resp.json()
+        assert any(c["id"] == test_camera.id for c in payload), (
+            "active_only must return active cameras (regression: SQLAlchemy `is True` bug)"
+        )
+        for cam in payload:
             assert cam["is_active"] is True
 
     def test_pagination(self, client, officer_headers):

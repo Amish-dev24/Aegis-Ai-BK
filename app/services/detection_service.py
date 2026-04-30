@@ -1178,6 +1178,91 @@ class DetectionService:
         return self._extract_weapons(results, weapon_conf)
 
     # ==================================================================
+    # Violence highlight region (motion-based box for annotation)
+    # ==================================================================
+    @staticmethod
+    def _violence_motion_bbox(
+        curr_bgr: np.ndarray, prev_bgr: Optional[np.ndarray]
+    ) -> list[float]:
+        """
+        Normalized [x, y, w, h] highlighting where motion is strongest (0–1 coords).
+        Used to draw a box when violence is flagged (Conv3D has no native localization).
+        """
+        h0, w0 = curr_bgr.shape[:2]
+        if prev_bgr is None or prev_bgr.size == 0:
+            return [0.02, 0.02, 0.96, 0.14]
+        if prev_bgr.shape[:2] != curr_bgr.shape[:2]:
+            prev_bgr = cv2.resize(prev_bgr, (w0, h0), interpolation=cv2.INTER_LINEAR)
+        prev_gray = cv2.cvtColor(prev_bgr, cv2.COLOR_BGR2GRAY)
+        curr_gray = cv2.cvtColor(curr_bgr, cv2.COLOR_BGR2GRAY)
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_gray,
+            curr_gray,
+            None,
+            pyr_scale=0.5,
+            levels=2,
+            winsize=11,
+            iterations=2,
+            poly_n=5,
+            poly_sigma=1.1,
+            flags=0,
+        )
+        mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        if mag.size == 0:
+            return [0.02, 0.02, 0.96, 0.14]
+        p90 = float(np.percentile(mag, 90))
+        mean_m = float(np.mean(mag))
+        thresh = max(p90, mean_m * 2.5, 0.8)
+        mask = ((mag > thresh).astype(np.uint8)) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return [0.02, 0.02, 0.96, 0.14]
+        x, y, cw, ch = cv2.boundingRect(max(contours, key=cv2.contourArea))
+        pad = max(12, min(w0, h0) // 64)
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w0, x + cw + pad)
+        y2 = min(h0, y + ch + pad)
+        if x2 <= x1 or y2 <= y1:
+            return [0.02, 0.02, 0.96, 0.14]
+        return [
+            x1 / float(w0),
+            y1 / float(h0),
+            (x2 - x1) / float(w0),
+            (y2 - y1) / float(h0),
+        ]
+
+    def _violence_detection_dict(
+        self,
+        is_violent: bool,
+        confidence: float,
+        model: str,
+        frame: np.ndarray,
+        previous_frames: list[np.ndarray],
+    ) -> dict[str, Any]:
+        prev = previous_frames[-1] if previous_frames else None
+        if is_violent:
+            bbox = self._violence_motion_bbox(frame, prev)
+            return {
+                "is_violent": True,
+                "confidence": round(float(confidence), 4),
+                "model": model,
+                "pose_data": {},
+                "bbox": bbox,
+                "class": "violence",
+            }
+        return {
+            "is_violent": False,
+            "confidence": round(float(confidence), 4),
+            "model": model,
+            "pose_data": {},
+            "bbox": [0.0, 0.0, 0.0, 0.0],
+        }
+
+    # ==================================================================
     # 2. Violence / aggression detection  (Conv3D trained model)
     # ==================================================================
     def detect_violence(
@@ -1191,6 +1276,7 @@ class DetectionService:
         Uses 16 frames (current + previous) resized to 64x64.
         Model trained on Real Life Violence Situations Dataset (~89.8% accuracy).
         Falls back to optical flow if Conv3D model not available.
+        When violent, adds a motion-based ``bbox`` for on-frame annotation.
         """
         # ── Primary: Conv3D trained model ──
         thr = float(getattr(settings, "VIOLENCE_DEFAULT_PROB_THRESHOLD", 0.5))
@@ -1240,12 +1326,9 @@ class DetectionService:
                 violence_prob = float(probs[1])  # index 1 = violent
 
                 is_violent = violence_prob >= thr
-                return {
-                    "is_violent": is_violent,
-                    "confidence": round(violence_prob, 4),
-                    "model": "conv3d",
-                    "pose_data": {},
-                }
+                return self._violence_detection_dict(
+                    is_violent, violence_prob, "conv3d", frame, previous_frames
+                )
             except Exception as e:
                 logger.warning("Conv3D violence inference failed: %s", e)
 
@@ -1272,12 +1355,9 @@ class DetectionService:
         confidence = min(1.0, motion_score / 10.0)
         is_violent = confidence >= 0.8
 
-        return {
-            "is_violent": is_violent,
-            "confidence": round(confidence, 4),
-            "model": "optical_flow_fallback",
-            "pose_data": {},
-        }
+        return self._violence_detection_dict(
+            is_violent, confidence, "optical_flow_fallback", frame, previous_frames
+        )
 
     # ==================================================================
     # 3. Abandoned object detection — extract from shared YOLO results
@@ -1405,6 +1485,24 @@ class DetectionService:
                 )
 
         return detections
+
+    def collect_face_bboxes_normalized(self, frame: np.ndarray) -> list[list[float]]:
+        """All face bounding boxes in normalized [x, y, w, h] (for privacy blur)."""
+        if self.face_model is None:
+            return []
+        h, w = frame.shape[:2]
+        results = self.face_model(
+            frame,
+            conf=self.confidence_threshold,
+            verbose=False,
+            half=self._face_on_cuda,
+        )
+        out: list[list[float]] = []
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                out.append([x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h])
+        return out
 
     # ==================================================================
     # 5. Crowd density estimation  (CSRNet / SANet)
