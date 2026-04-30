@@ -84,7 +84,7 @@ async def list_cameras(
         query = query.filter(Camera.company_id == company_filter)
 
     if active_only:
-        query = query.filter(Camera.is_active is True)
+        query = query.filter(Camera.is_active.is_(True))
 
     cameras = query.order_by(Camera.id).offset(offset).limit(limit).all()
     return cameras

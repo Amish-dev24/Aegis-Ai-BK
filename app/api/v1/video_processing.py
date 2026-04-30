@@ -36,6 +36,7 @@ from app.core.security import (
 )
 from app.database import SessionLocal, get_db
 from app.models.alert import Alert, AlertStatus
+from app.models.audit_log import AuditLog, create_audit_log
 from app.models.camera import Camera
 from app.models.detection import Detection, DetectionType
 from app.models.evidence import Evidence
@@ -325,6 +326,8 @@ async def start_video_processing(
         "camera_id": camera_id,
         "company_id": camera.company_id,
         "user_id": current_user.id,
+        "submitter_username": current_user.username,
+        "submitter_full_name": current_user.full_name or "",
         "user_email": current_user.email,
         "user_phone": current_user.phone_number or "",
         "user_alert_preference": getattr(current_user, "alert_preference", "email"),
@@ -340,6 +343,25 @@ async def start_video_processing(
     # Persist immediately so the job is always findable even if the container
     # restarts before processing completes (avoids 404 mid-process).
     _save_job_to_disk(_jobs[job_id])
+
+    db.add(
+        create_audit_log(
+            request,
+            current_user.id,
+            "video_analysis_started",
+            "video_analysis",
+            camera_id,
+            {
+                "job_id": job_id,
+                "filename": video_file.filename,
+                "camera_name": camera.name,
+                "processed_by_username": current_user.username,
+                "processed_by_name": (current_user.full_name or "").strip()
+                or current_user.username,
+            },
+        )
+    )
+    db.commit()
 
     loop = asyncio.get_event_loop()
     loop.run_in_executor(_thread_pool, _process_video_sync, job_id)
@@ -497,8 +519,16 @@ def _run_analysis(
         save_crowd_evidence = bool(getattr(settings, "CROWD_SAVE_EVIDENCE", False))
         if det_type != DetectionType.CROWD_DENSITY or save_crowd_evidence:
             label = f"{det.get('class', det_type.value)} {confidence:.0%}"
+            face_boxes = (
+                detection_service.collect_face_bboxes_normalized(full_frame)
+                if getattr(settings, "PRIVACY_BLUR_NON_SUBJECT_FACES", True)
+                else []
+            )
+            snap_frame = video_service.privacy_blur_for_snapshot(
+                full_frame, det_type.value, bbox, face_boxes
+            )
             snapshot_path = video_service.save_snapshot(
-                full_frame,
+                snap_frame,
                 db_detection.id,
                 prefix=det_type.value,
                 bbox=bbox,
@@ -585,6 +615,60 @@ def _run_analysis(
 
     job["_pdb"] = pending_db_count
     return active_detections, heatmap_overlay
+
+
+def _write_video_processing_finished_audit(
+    job: dict, *, success: bool, error: Optional[str] = None
+) -> None:
+    """Persist audit row for completed/failed video analysis (runs in worker thread)."""
+    uid = job.get("user_id")
+    if uid is None:
+        return
+    submitter_username = job.get("submitter_username")
+    submitter_full_name = job.get("submitter_full_name")
+    if isinstance(submitter_full_name, str) and not submitter_full_name.strip():
+        submitter_full_name = None
+
+    details: dict = {
+        "job_id": job.get("job_id"),
+        "filename": job.get("filename"),
+        "camera_name": job.get("camera_name"),
+        "camera_id": job.get("camera_id"),
+        "success": success,
+        "total_detections": job.get("total_detections"),
+        "total_alerts": job.get("total_alerts"),
+    }
+    if error:
+        details["error"] = error[:500]
+    action = "video_analysis_completed" if success else "video_analysis_failed"
+
+    sess = SessionLocal()
+    try:
+        if not submitter_username or not submitter_full_name:
+            u = sess.query(User).filter(User.id == uid).first()
+            if u:
+                submitter_username = submitter_username or u.username
+                submitter_full_name = submitter_full_name or (u.full_name or u.username)
+        details["processed_by_username"] = submitter_username
+        details["processed_by_name"] = submitter_full_name or submitter_username
+
+        sess.add(
+            AuditLog(
+                user_id=uid,
+                action=action,
+                resource_type="video_analysis",
+                resource_id=job.get("camera_id"),
+                ip_address=None,
+                user_agent=None,
+                details=details,
+            )
+        )
+        sess.commit()
+    except Exception as exc:
+        logger.warning("Video processing audit log failed: %s", exc)
+        sess.rollback()
+    finally:
+        sess.close()
 
 
 # ---------------------------------------------------------------------------
@@ -719,12 +803,27 @@ def _process_video_sync(job_id: str):
                         pending_db_count = job.get("_pdb", 0)
 
                     if writer:
+                        base_for_draw = frame
+                        if getattr(settings, "PRIVACY_BLUR_IN_VIDEO_OUTPUT", True):
+                            vf_faces = detection_service.collect_face_bboxes_normalized(frame)
+                            preserve_mf: list[list[float]] = []
+                            for d in active_detections or []:
+                                if d.get("det_type") != "mask_face":
+                                    continue
+                                bb = d.get("bbox") or []
+                                if len(bb) >= 4 and float(bb[2]) > 0 and float(bb[3]) > 0:
+                                    preserve_mf.append(bb)
+                            base_for_draw = video_service.privacy_blur_for_video_frame(
+                                frame, preserve_mf, vf_faces
+                            )
                         if active_detections:
                             annotated = video_service.draw_detections_on_frame(
-                                frame, active_detections, heatmap_overlay=heatmap_overlay
+                                base_for_draw,
+                                active_detections,
+                                heatmap_overlay=heatmap_overlay,
                             )
                         else:
-                            annotated = frame
+                            annotated = base_for_draw
                             # Still apply heatmap if available (even without other detections)
                             if heatmap_overlay is not None:
                                 fw = _crowd_heatmap_frame_weight()
@@ -738,11 +837,11 @@ def _process_video_sync(job_id: str):
                             if heatmap_overlay is not None:
                                 fw = _crowd_heatmap_frame_weight()
                                 heatmap_frame = cv2.addWeighted(
-                                    frame, fw, heatmap_overlay, 1.0 - fw, 0
+                                    base_for_draw, fw, heatmap_overlay, 1.0 - fw, 0
                                 )
                             else:
                                 # Write plain frame if no heatmap available yet
-                                heatmap_frame = frame
+                                heatmap_frame = base_for_draw
                             heatmap_writer.write(heatmap_frame)
 
                     job["current_frame"] = frame_index
@@ -841,6 +940,7 @@ def _process_video_sync(job_id: str):
             job["total_alerts"],
         )
         _save_job_to_disk(job)
+        _write_video_processing_finished_audit(job, success=True)
 
     except Exception as e:
         job["status"] = "failed"
@@ -848,6 +948,7 @@ def _process_video_sync(job_id: str):
         logger.exception("Job %s failed: %s", job_id, e)
         db.rollback()
         _save_job_to_disk(job)
+        _write_video_processing_finished_audit(job, success=False, error=str(e))
     finally:
         db.close()
         try:

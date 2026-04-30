@@ -101,8 +101,10 @@ class TestTopCameras:
     def test_top_cameras_items_have_expected_fields(self, client, officer_headers, test_detection):
         resp = client.get(f"{BASE}/top-cameras", headers=officer_headers)
         for cam in resp.json()["top_cameras"]:
-            assert "name" in cam
-            assert "count" in cam
+            assert "camera_id" in cam
+            assert "camera_name" in cam
+            assert "location" in cam
+            assert "detection_count" in cam
 
     def test_limit_param(self, client, officer_headers, test_detection):
         resp = client.get(f"{BASE}/top-cameras?limit=1", headers=officer_headers)

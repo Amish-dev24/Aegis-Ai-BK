@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_PHONE_NUMBER: str = ""  # Twilio phone number to send FROM
 
+    # Privacy: blur faces in evidence / video except the subject face (mask_face bbox)
+    PRIVACY_BLUR_NON_SUBJECT_FACES: bool = True
+    PRIVACY_BLUR_IN_VIDEO_OUTPUT: bool = True
+    PRIVACY_FACE_BLUR_KSIZE: int = 51  # Gaussian kernel (odd, >= 3)
+    PRIVACY_FACE_IOU_KEEP: float = 0.12  # face kept sharp if IoU with subject >= this
+
     # Data Retention (auto-cleanup of old evidence/detections)
     DATA_RETENTION_DAYS: int = 90  # Delete data older than this (0 = never delete)
 

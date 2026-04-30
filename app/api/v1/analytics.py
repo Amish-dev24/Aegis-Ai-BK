@@ -179,7 +179,12 @@ async def get_top_cameras(
     start_date = datetime.utcnow() - timedelta(days=days)
 
     query = (
-        db.query(Camera.name, Camera.location, func.count(Detection.id).label("count"))
+        db.query(
+            Camera.id,
+            Camera.name,
+            Camera.location,
+            func.count(Detection.id).label("count"),
+        )
         .join(Detection, Camera.id == Detection.camera_id)
         .filter(Detection.detected_at >= start_date)
     )
@@ -194,7 +199,13 @@ async def get_top_cameras(
     )
 
     top_cameras = [
-        {"name": name, "location": location, "count": count} for name, location, count in results
+        {
+            "camera_id": cam_id,
+            "camera_name": name or "",
+            "location": location or "",
+            "detection_count": int(count or 0),
+        }
+        for cam_id, name, location, count in results
     ]
 
     return {"top_cameras": top_cameras}

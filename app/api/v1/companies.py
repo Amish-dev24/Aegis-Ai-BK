@@ -41,7 +41,7 @@ async def list_companies(
     """List all companies (Aegis AI admin only)."""
     query = db.query(Company)
     if verified_only:
-        query = query.filter(Company.is_verified is True)
+        query = query.filter(Company.is_verified.is_(True))
     companies = query.order_by(Company.id).offset(offset).limit(limit).all()
     return companies
 
@@ -71,7 +71,7 @@ async def get_companies_stats(
     user_active = {
         row.company_id: row.total
         for row in db.query(User.company_id, func.count(User.id).label("total"))
-        .filter(User.company_id.in_(company_ids), User.is_active is True)
+        .filter(User.company_id.in_(company_ids), User.is_active.is_(True))
         .group_by(User.company_id)
         .all()
     }
@@ -85,7 +85,7 @@ async def get_companies_stats(
     camera_active = {
         row.company_id: row.total
         for row in db.query(Camera.company_id, func.count(Camera.id).label("total"))
-        .filter(Camera.company_id.in_(company_ids), Camera.is_active is True)
+        .filter(Camera.company_id.in_(company_ids), Camera.is_active.is_(True))
         .group_by(Camera.company_id)
         .all()
     }
@@ -164,7 +164,7 @@ async def get_company(
     user_count = db.query(func.count(User.id)).filter(User.company_id == company.id).scalar()
     active_user_count = (
         db.query(func.count(User.id))
-        .filter(User.company_id == company.id, User.is_active is True)
+        .filter(User.company_id == company.id, User.is_active.is_(True))
         .scalar()
     )
 
