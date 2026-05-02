@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.security import (
@@ -63,12 +64,41 @@ def _build_log_responses(alert: Alert, db: Session) -> list:
     ]
 
 
+def _latest_alert_notes(
+    db: Session, alert_ids: list[int]
+) -> dict[int, tuple[Optional[str], Optional[datetime]]]:
+    """One row per alert: message and time of most recent AlertLog."""
+    if not alert_ids:
+        return {}
+    subq = (
+        db.query(
+            AlertLog.alert_id,
+            func.max(AlertLog.created_at).label("mx"),
+        )
+        .filter(AlertLog.alert_id.in_(alert_ids))
+        .group_by(AlertLog.alert_id)
+        .subquery()
+    )
+    rows = (
+        db.query(AlertLog)
+        .join(
+            subq,
+            (AlertLog.alert_id == subq.c.alert_id) & (AlertLog.created_at == subq.c.mx),
+        )
+        .all()
+    )
+    return {r.alert_id: (r.message, r.created_at) for r in rows}
+
+
 def _enrich_alert(
     alert: Alert,
     detection: Detection = None,
     camera: Camera = None,
     evidence: Evidence = None,
     logs: list = None,
+    *,
+    latest_note: Optional[str] = None,
+    latest_note_at: Optional[datetime] = None,
 ) -> AlertDetailResponse:
     """Build enriched alert with detection context, camera info, evidence image, and logs."""
     image_url = None
@@ -104,6 +134,8 @@ def _enrich_alert(
         evidence_image_url=image_url,
         # Logs
         logs=logs or [],
+        latest_note=latest_note,
+        latest_note_at=latest_note_at,
     )
 
 
@@ -187,6 +219,11 @@ async def list_alerts(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
+    include_latest_note: bool = Query(
+        False,
+        alias="include_latest_note",
+        description="Include latest AlertLog text per alert (header / incident feed)",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
 ):
@@ -227,10 +264,26 @@ async def list_alerts(
             if ev.detection_id not in evidence_map:
                 evidence_map[ev.detection_id] = ev
 
-    return [
-        _enrich_alert(alert, detection, camera, evidence_map.get(detection.id))
-        for alert, detection, camera in results
-    ]
+    note_map: dict[int, tuple[Optional[str], Optional[datetime]]] = {}
+    if include_latest_note:
+        aids = [a.id for a, _, _ in results]
+        note_map = _latest_alert_notes(db, aids)
+
+    out: list[AlertDetailResponse] = []
+    for alert, detection, camera in results:
+        pair = note_map.get(alert.id) if include_latest_note else None
+        ln, ln_at = (pair[0], pair[1]) if pair else (None, None)
+        out.append(
+            _enrich_alert(
+                alert,
+                detection,
+                camera,
+                evidence_map.get(detection.id),
+                latest_note=ln,
+                latest_note_at=ln_at,
+            )
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------

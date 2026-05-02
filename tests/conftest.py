@@ -55,6 +55,8 @@ from app.models.alert import Alert, AlertStatus  # noqa: E402
 from app.models.camera import Camera  # noqa: E402
 from app.models.company import Company  # noqa: E402
 from app.models.detection import Detection, DetectionType, ThreatLevel  # noqa: E402
+from app.models.evidence import Evidence  # noqa: F401,E402 — register table(s)
+from app.models.notification_feed import NotificationFeed  # noqa: F401,E402 — register table
 from app.models.user import Role, User  # noqa: E402
 
 # ── 5. Override get_db dependency ────────────────────────────────────────────

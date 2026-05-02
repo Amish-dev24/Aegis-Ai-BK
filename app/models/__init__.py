@@ -5,6 +5,7 @@ from app.models.company import Company
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.detection_settings import CompanyDetectionSettings, GlobalModuleSettings
 from app.models.evidence import Evidence
+from app.models.notification_feed import NotificationFeed
 from app.models.user import Role, User
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "AuditLog",
     "GlobalModuleSettings",
     "CompanyDetectionSettings",
+    "NotificationFeed",
 ]

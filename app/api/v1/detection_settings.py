@@ -24,6 +24,10 @@ from app.schemas.detection_settings import (
     GlobalModuleSettingsResponse,
     GlobalModuleSettingsUpdate,
 )
+from app.services.notification_feed_service import (
+    record_company_module_change,
+    record_platform_module_change,
+)
 
 router = APIRouter(prefix="/detection-settings", tags=["detection-settings"])
 
@@ -66,6 +70,13 @@ async def update_global_setting(
     )
     setting.is_enabled = data.is_enabled
     setting.updated_by = current_user.id
+    record_platform_module_change(
+        db,
+        module_name=module_name,
+        is_enabled=data.is_enabled,
+        actor_username=current_user.username,
+        actor_user_id=current_user.id,
+    )
     db.commit()
     db.refresh(setting)
     return setting
@@ -137,6 +148,17 @@ async def create_company_setting(
 
     setting = CompanyDetectionSettings(company_id=company_id, **data.dict())
     db.add(setting)
+    record_company_module_change(
+        db,
+        company_id=company_id,
+        module_name=data.module_name,
+        message=(
+            f"{current_user.username} added company overrides for '{data.module_name}' "
+            f"(module enabled={'yes' if data.is_enabled else 'no'})."
+        ),
+        actor_username=current_user.username,
+        actor_user_id=current_user.id,
+    )
     db.commit()
     db.refresh(setting)
     return setting
@@ -176,6 +198,15 @@ async def update_company_setting(
     update_data = data.dict(exclude_unset=True)
     for key, value in update_data.items():
         setattr(setting, key, value)
+    bits = ", ".join(sorted(update_data.keys())) or "settings"
+    record_company_module_change(
+        db,
+        company_id=company_id,
+        module_name=module_name,
+        message=f"{current_user.username} updated '{module_name}' ({bits}).",
+        actor_username=current_user.username,
+        actor_user_id=current_user.id,
+    )
     db.commit()
     db.refresh(setting)
     return setting
@@ -204,4 +235,15 @@ async def delete_company_setting(
         raise HTTPException(status_code=404, detail="Setting not found")
 
     db.delete(setting)
+    record_company_module_change(
+        db,
+        company_id=company_id,
+        module_name=module_name,
+        message=(
+            f"{current_user.username} removed custom '{module_name}' configuration; "
+            "global defaults apply."
+        ),
+        actor_username=current_user.username,
+        actor_user_id=current_user.id,
+    )
     db.commit()

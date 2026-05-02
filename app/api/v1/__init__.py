@@ -15,6 +15,7 @@ from app.api.v1 import (
     detections,
     emergency_contacts,
     evidence,
+    notification_feed,
     retention,
     users,
     video_processing,
@@ -28,6 +29,7 @@ api_router.include_router(companies.router)
 api_router.include_router(cameras.router)
 api_router.include_router(detections.router)
 api_router.include_router(alerts.router)
+api_router.include_router(notification_feed.router)
 api_router.include_router(evidence.router)
 api_router.include_router(analytics.router)
 api_router.include_router(audit_logs.router)

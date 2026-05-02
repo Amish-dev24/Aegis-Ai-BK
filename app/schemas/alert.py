@@ -93,3 +93,7 @@ class AlertDetailResponse(AlertResponse):
 
     # Incident logs
     logs: list[AlertLogResponse] = []
+
+    # Latest incident note (AlertLog) — for header feed without loading full logs
+    latest_note: Optional[str] = None
+    latest_note_at: Optional[datetime] = None

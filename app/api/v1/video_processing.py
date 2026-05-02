@@ -36,7 +36,7 @@ from app.core.security import (
 )
 from app.database import SessionLocal, get_db
 from app.models.alert import Alert, AlertStatus
-from app.models.audit_log import AuditLog, create_audit_log
+from app.models.audit_log import AuditLog, create_audit_log, get_client_ip
 from app.models.camera import Camera
 from app.models.detection import Detection, DetectionType
 from app.models.evidence import Evidence
@@ -326,6 +326,7 @@ async def start_video_processing(
         "camera_id": camera_id,
         "company_id": camera.company_id,
         "user_id": current_user.id,
+        "client_ip": get_client_ip(request),
         "submitter_username": current_user.username,
         "submitter_full_name": current_user.full_name or "",
         "user_email": current_user.email,
@@ -658,7 +659,7 @@ def _write_video_processing_finished_audit(
                 action=action,
                 resource_type="video_analysis",
                 resource_id=job.get("camera_id"),
-                ip_address=None,
+                ip_address=job.get("client_ip"),
                 user_agent=None,
                 details=details,
             )

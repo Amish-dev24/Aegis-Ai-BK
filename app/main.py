@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.v1 import api_router
 from app.config import settings
@@ -77,6 +78,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# After CORS so this wraps the outer stack: adjusts scope["client"] / scheme from X-Forwarded-* when the TCP peer is trusted.
+_app_trusted_hosts = settings.PROXY_HEADERS_TRUSTED_HOSTS.strip()
+if _app_trusted_hosts:
+    app.add_middleware(
+        ProxyHeadersMiddleware,
+        trusted_hosts=_app_trusted_hosts if _app_trusted_hosts != "*" else "*",
+    )
+
 # Include API routes
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
@@ -134,4 +143,5 @@ if __name__ == "__main__":
         reload=settings.DEBUG,
         ssl_keyfile=settings.SSL_KEY_PATH if settings.SSL_KEY_PATH else None,
         ssl_certfile=settings.SSL_CERT_PATH if settings.SSL_CERT_PATH else None,
+        proxy_headers=False,
     )

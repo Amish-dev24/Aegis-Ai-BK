@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     ENVIRONMENT: str = "development"
     ALLOWED_ORIGINS: str = ""  # Comma-separated origins for CORS in production
+    # Trust X-Forwarded-Proto / X-Forwarded-For from these direct peers only (comma-separated IPs, CIDRs, or "*" for any).
+    # Default includes RFC1918 + loopback so Docker / LAN reverse proxies populate request.client safely; set "*" only if you understand spoofing risk.
+    PROXY_HEADERS_TRUSTED_HOSTS: str = (
+        "127.0.0.1,::1,::ffff:127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    )
 
     # Twilio SMS
     TWILIO_ACCOUNT_SID: str = ""
