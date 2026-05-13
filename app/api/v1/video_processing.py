@@ -79,13 +79,10 @@ def _check_job_access(job: dict, current_user: User) -> None:
     """Raise 403 if the user is not allowed to access this job.
 
     Access rules:
-    - AEGIS_ADMIN  : unrestricted
-    - ADMIN        : any job belonging to their own company
+    - ADMIN / AEGIS_ADMIN : job must belong to their company
     - All others   : only jobs they personally submitted (user_id match)
     """
-    if current_user.role == Role.AEGIS_ADMIN:
-        return
-    if current_user.role == Role.ADMIN:
+    if current_user.role in (Role.ADMIN, Role.AEGIS_ADMIN):
         if job.get("company_id") == current_user.company_id:
             return
     elif job.get("user_id") == current_user.id:
@@ -1127,17 +1124,11 @@ async def list_jobs(
     """List all processing jobs for the current user."""
     results = []
     for job in _jobs.values():
-        # AEGIS_ADMIN sees every job
-        if current_user.role == Role.AEGIS_ADMIN:
-            pass
-        # Company ADMIN sees all jobs belonging to their company
-        elif current_user.role == Role.ADMIN:
+        if current_user.role in (Role.ADMIN, Role.AEGIS_ADMIN):
             if job.get("company_id") != current_user.company_id:
                 continue
-        # All other roles (SECURITY_OFFICER, VIEWER) see only their own jobs
-        else:
-            if job.get("user_id") != current_user.id:
-                continue
+        elif job.get("user_id") != current_user.id:
+            continue
 
         if status_filter and job["status"] != status_filter:
             continue

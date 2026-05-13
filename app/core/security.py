@@ -17,6 +17,10 @@ from app.models.user import Role, User
 
 pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_PREFIX}/auth/login")
+oauth2_optional = OAuth2PasswordBearer(
+    tokenUrl=f"{settings.API_V1_PREFIX}/auth/login",
+    auto_error=False,
+)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -70,10 +74,8 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
     return user
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
-) -> User:
-    """Get current authenticated user."""
+def user_from_access_token(db: Session, token: str) -> User:
+    """Validate a JWT access token string and return the user."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -94,6 +96,13 @@ async def get_current_user(
     return user
 
 
+async def get_current_user(
+    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+) -> User:
+    """Get current authenticated user."""
+    return user_from_access_token(db, token)
+
+
 def require_role(allowed_roles: list[Role]):
     """Dependency to require specific roles."""
 
@@ -108,41 +117,61 @@ def require_role(allowed_roles: list[Role]):
 
 
 def check_company_access(user: User, company_id: int) -> bool:
-    """Check if user has access to a company's resources."""
-    # Aegis AI admins have access to all companies
-    if user.role == Role.AEGIS_ADMIN:
-        return True
-    # Company admins and officers can only access their own company
-    if user.company_id == company_id:
-        return True
-    return False
+    """Operational tenant check (cameras, detections, alerts, evidence, analytics).
+
+    All roles, including ``aegis_admin``, are limited to their own ``company_id``.
+    """
+    if user.company_id is None or company_id is None:
+        return False
+    return user.company_id == company_id
 
 
-def get_user_company_filter(user: User, company_id_override: int = None):
-    """Get company filter for queries based on user role.
-    For aegis_admin: pass company_id_override to filter by specific company, or None for all.
+def check_directory_company_access(user: User, resource_company_id: Optional[int]) -> bool:
+    """Admin / directory resources (users list, emergency contacts, company-scoped settings UI).
+
+    ``aegis_admin`` may act on any company's directory records; other roles use
+    :func:`check_company_access` semantics when ``resource_company_id`` is set.
     """
     if user.role == Role.AEGIS_ADMIN:
-        return company_id_override
-    return user.company_id
+        return True
+    if resource_company_id is None:
+        return False
+    return check_company_access(user, resource_company_id)
+
+
+def get_user_company_filter(user: User, company_id_override: Optional[int] = None):
+    """Strict operational tenant for cameras, detections, alerts, evidence, analytics.
+
+    Query param ``company_id`` must match the user's ``company_id`` or the result is
+    ``None`` (empty list). ``aegis_admin`` cannot use this to cross tenants.
+    """
+    cid = user.company_id
+    if cid is None:
+        return None
+    if company_id_override is not None and company_id_override != cid:
+        return None
+    return cid
+
+
+def get_directory_company_filter(user: User, company_id_override: Optional[int] = None):
+    """Company scope for directory-style list endpoints (users, emergency contacts).
+
+    - ``aegis_admin``: ``company_id_override`` if provided, else the admin's own
+      ``company_id`` (may be ``None`` → caller returns empty until a company is chosen).
+    - Everyone else: same as :func:`get_user_company_filter`.
+    """
+    if user.role == Role.AEGIS_ADMIN:
+        if company_id_override is not None:
+            return company_id_override
+        return user.company_id
+    return get_user_company_filter(user, company_id_override)
 
 
 def get_company_filter_required(
     user: User, company_id_override: Optional[int] = None
 ) -> Optional[int]:
-    """Get the company ID to scope a query to, enforcing strict per-company isolation.
-
-    Returns:
-    - An integer company ID when a specific company is known.
-    - None when AEGIS_ADMIN has not selected a company yet — callers must return
-      empty results in that case so no cross-company data leaks.
-
-    Unlike get_user_company_filter (which returns None to mean "no filter / all companies"),
-    a None return here always means "no data to show".
-    """
-    if user.role == Role.AEGIS_ADMIN:
-        return company_id_override  # None → caller will return empty results
-    return user.company_id  # None for unassigned users → caller will return empty results
+    """Same scoping as ``get_user_company_filter``; ``None`` always means no tenant data."""
+    return get_user_company_filter(user, company_id_override)
 
 
 # Common role dependencies

@@ -14,7 +14,7 @@ from app.database import Base
 class Role(str, enum.Enum):
     """User roles for RBAC."""
 
-    AEGIS_ADMIN = "aegis_admin"  # Aegis AI platform admin - can verify companies and see all users
+    AEGIS_ADMIN = "aegis_admin"  # Platform admin; operational data scoped to assigned company_id
     ADMIN = "admin"  # Company admin - full control within their company
     SECURITY_OFFICER = "security_officer"  # Company security officer - operational role
     VIEWER = "viewer"  # Read-only access within their company

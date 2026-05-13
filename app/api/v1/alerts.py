@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.core.security import (
     check_company_access,
-    get_user_company_filter,
+    check_directory_company_access,
+    get_directory_company_filter,
     require_any_authenticated,
     require_security_officer,
 )
@@ -23,7 +24,7 @@ from app.models.audit_log import create_audit_log
 from app.models.camera import Camera
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.evidence import Evidence
-from app.models.user import Role, User
+from app.models.user import User
 from app.schemas.alert import (
     AlertCreate,
     AlertDetailResponse,
@@ -218,7 +219,10 @@ async def list_alerts(
     end_date: Optional[datetime] = Query(None, description="Filter to date"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    company_id: Optional[int] = Query(None, description="Filter by company (aegis admin)"),
+    company_id: Optional[int] = Query(
+        None,
+        description="Company scope (aegis_admin: any company; company staff: must match tenant)",
+    ),
     include_latest_note: bool = Query(
         False,
         alias="include_latest_note",
@@ -228,17 +232,16 @@ async def list_alerts(
     current_user: User = Depends(require_any_authenticated),
 ):
     """List alerts with filters. Includes detection context, camera info, and evidence image."""
-    company_filter = get_user_company_filter(current_user, company_id)
-    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+    company_filter = get_directory_company_filter(current_user, company_id)
+    if company_filter is None:
         return []
 
     query = (
         db.query(Alert, Detection, Camera)
         .join(Detection, Alert.detection_id == Detection.id)
         .join(Camera, Detection.camera_id == Camera.id)
+        .filter(Alert.company_id == company_filter)
     )
-    if company_filter is not None:
-        query = query.filter(Alert.company_id == company_filter)
 
     if status_filter:
         query = query.filter(Alert.status == status_filter)
@@ -301,7 +304,7 @@ async def get_alert(
     if not alert:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
 
-    if alert.company_id and not check_company_access(current_user, alert.company_id):
+    if alert.company_id and not check_directory_company_access(current_user, alert.company_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
 
     detection = db.query(Detection).filter(Detection.id == alert.detection_id).first()
@@ -382,7 +385,7 @@ async def list_alert_logs(
     if not alert:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
 
-    if alert.company_id and not check_company_access(current_user, alert.company_id):
+    if alert.company_id and not check_directory_company_access(current_user, alert.company_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
 
     return _build_log_responses(alert, db)

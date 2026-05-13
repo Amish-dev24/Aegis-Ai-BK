@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import (
     check_company_access,
+    check_directory_company_access,
     get_user_company_filter,
     require_any_authenticated,
 )
@@ -22,15 +23,29 @@ from app.models.audit_log import create_audit_log
 from app.models.camera import Camera
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.evidence import Evidence
-from app.models.user import Role, User
+from app.models.user import User
 from app.schemas.evidence import EvidenceResponse
 
 router = APIRouter(prefix="/evidence", tags=["evidence"])
 
 
-def _check_detection_access(detection: Detection, current_user: User):
-    """Verify the user has company-level access to the parent detection."""
-    if detection.company_id and not check_company_access(current_user, detection.company_id):
+def _check_detection_access(
+    detection: Detection, current_user: User, *, read_only: bool = False
+):
+    """Verify company-level access to the parent detection.
+
+    Writes stay tenant-scoped for everyone including aegis_admin. Reads allow
+    aegis_admin to view any tenant (e.g. false-positive review across companies).
+    """
+    if not detection.company_id:
+        return
+    if read_only:
+        if not check_directory_company_access(current_user, detection.company_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to access this evidence",
+            )
+    elif not check_company_access(current_user, detection.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions to access this evidence",
@@ -121,16 +136,15 @@ async def list_evidence(
 ):
     """List evidence with filters and pagination. Includes detection context."""
     company_filter = get_user_company_filter(current_user, company_id)
-    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+    if company_filter is None:
         return []
 
     query = (
         db.query(Evidence, Detection, Camera)
         .join(Detection, Evidence.detection_id == Detection.id)
         .join(Camera, Detection.camera_id == Camera.id)
+        .filter(Detection.company_id == company_filter)
     )
-    if company_filter is not None:
-        query = query.filter(Detection.company_id == company_filter)
     if detection_id:
         query = query.filter(Evidence.detection_id == detection_id)
     if camera_id:
@@ -166,7 +180,7 @@ def _load_evidence_with_detection(evidence_id: int, current_user: User, db: Sess
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence not found")
     evidence, detection, camera = row
-    _check_detection_access(detection, current_user)
+    _check_detection_access(detection, current_user, read_only=True)
     return evidence, detection, camera
 
 
@@ -249,10 +263,10 @@ async def export_evidence(
     company_filter = get_user_company_filter(current_user, company_id)
 
     det_query = db.query(Detection).filter(Detection.id.in_(detection_ids))
-    if company_filter is not None:
-        det_query = det_query.filter(Detection.company_id == company_filter)
-    elif current_user.role != Role.AEGIS_ADMIN:
+    if company_filter is None:
         det_query = det_query.filter(False)
+    else:
+        det_query = det_query.filter(Detection.company_id == company_filter)
 
     detections = det_query.all()
     accessible_ids = [d.id for d in detections]
