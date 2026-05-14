@@ -196,14 +196,47 @@ async def update_company_setting(
         )
 
     update_data = data.dict(exclude_unset=True)
+
+    # Diff: compare incoming values against current DB values to build a
+    # meaningful message instead of listing every field in the payload.
+    FRIENDLY = {
+        "is_enabled": "enabled",
+        "min_confidence": "min confidence",
+        "high_threshold": "high threshold",
+        "medium_threshold": "medium threshold",
+        "critical_threshold": "critical threshold",
+        "abandoned_seconds": "abandoned seconds",
+        "alert_on_levels": "alert levels",
+    }
+
+    changed_parts: list[str] = []
+    for key, new_val in update_data.items():
+        old_val = getattr(setting, key, None)
+        if old_val == new_val:
+            continue
+        label = FRIENDLY.get(key, key)
+        if key == "is_enabled":
+            changed_parts.append("enabled" if new_val else "disabled")
+        elif isinstance(new_val, float):
+            old_str = f"{old_val:.0%}" if isinstance(old_val, float) else str(old_val)
+            changed_parts.append(f"{label}: {old_str}→{new_val:.0%}")
+        else:
+            changed_parts.append(f"{label}: {old_val}→{new_val}")
+
     for key, value in update_data.items():
         setattr(setting, key, value)
-    bits = ", ".join(sorted(update_data.keys())) or "settings"
+
+    if changed_parts:
+        summary = ", ".join(changed_parts)
+        message = f"{current_user.username} updated '{module_name}': {summary}."
+    else:
+        message = f"{current_user.username} saved '{module_name}' (no changes)."
+
     record_company_module_change(
         db,
         company_id=company_id,
         module_name=module_name,
-        message=f"{current_user.username} updated '{module_name}' ({bits}).",
+        message=message,
         actor_username=current_user.username,
         actor_user_id=current_user.id,
     )
