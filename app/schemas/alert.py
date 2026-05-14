@@ -42,7 +42,10 @@ class AlertResponse(AlertBase):
     email_sent_at: Optional[datetime] = None
     acknowledged_by: Optional[str] = None
     acknowledged_at: Optional[datetime] = None
+    resolved_by: Optional[str] = None
     resolved_at: Optional[datetime] = None
+    false_positive_by: Optional[str] = None
+    false_positive_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:

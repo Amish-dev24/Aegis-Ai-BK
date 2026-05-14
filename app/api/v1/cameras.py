@@ -20,9 +20,13 @@ from app.core.security import (
     require_security_officer,
     user_from_access_token,
 )
+from pathlib import Path
+
 from app.database import get_db
 from app.models.audit_log import create_audit_log
 from app.models.camera import Camera
+from app.models.detection import Detection
+from app.models.evidence import Evidence
 from app.models.user import User
 from app.schemas.camera import CameraCreate, CameraResponse, CameraUpdate
 from app.services.frame_detection_pipeline import encode_jpeg_bytes, grab_jpeg_snapshot, open_stream_capture
@@ -167,6 +171,48 @@ async def camera_snapshot(
         )
 
     return Response(content=jpeg, media_type="image/jpeg")
+
+
+@router.get("/{camera_id}/last-snapshot", response_class=Response)
+async def camera_last_snapshot(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the most recent evidence snapshot image for this camera.
+
+    Used by the UI to show a still from the last processed video when the
+    camera has no live stream_url configured.
+    """
+    camera = _get_camera_or_404(db, camera_id)
+    _ensure_camera_company_access(camera, current_user)
+
+    evidence = (
+        db.query(Evidence)
+        .join(Detection, Evidence.detection_id == Detection.id)
+        .filter(
+            Detection.camera_id == camera_id,
+            Evidence.image_path.isnot(None),
+        )
+        .order_by(Evidence.created_at.desc())
+        .first()
+    )
+
+    if not evidence or not evidence.image_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No snapshots found for this camera yet",
+        )
+
+    img_path = Path(evidence.image_path)
+    if not img_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Snapshot file no longer on disk",
+        )
+
+    return Response(content=img_path.read_bytes(), media_type="image/jpeg")
 
 
 @router.get("/{camera_id}/preview")

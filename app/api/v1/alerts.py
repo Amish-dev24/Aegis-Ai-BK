@@ -120,7 +120,10 @@ def _enrich_alert(
         email_sent_at=alert.email_sent_at,
         acknowledged_by=alert.acknowledged_by,
         acknowledged_at=alert.acknowledged_at,
+        resolved_by=alert.resolved_by,
         resolved_at=alert.resolved_at,
+        false_positive_by=alert.false_positive_by,
+        false_positive_at=alert.false_positive_at,
         created_at=alert.created_at,
         # Detection context
         detection_type=detection.detection_type.value if detection else None,
@@ -429,7 +432,11 @@ async def update_alert(
         alert.acknowledged_by = current_user.username
         alert.acknowledged_at = datetime.utcnow()
     elif alert.status == AlertStatus.RESOLVED and not alert.resolved_at:
+        alert.resolved_by = current_user.username
         alert.resolved_at = datetime.utcnow()
+    elif alert.status == AlertStatus.FALSE_POSITIVE and not alert.false_positive_at:
+        alert.false_positive_by = current_user.username
+        alert.false_positive_at = datetime.utcnow()
 
     # Auto-log status changes
     if "status" in update_data and update_data["status"].value != old_status:
