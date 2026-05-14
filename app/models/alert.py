@@ -43,7 +43,10 @@ class Alert(Base):
     email_sent_at = Column(DateTime(timezone=True), nullable=True)
     acknowledged_by = Column(String(100), nullable=True)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by = Column(String(100), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
+    false_positive_by = Column(String(100), nullable=True)
+    false_positive_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
