@@ -27,6 +27,7 @@ from app.models.user import User
 from app.schemas.camera import CameraCreate, CameraResponse, CameraUpdate
 from app.services.frame_detection_pipeline import encode_jpeg_bytes, grab_jpeg_snapshot, open_stream_capture
 from app.services import live_camera_runtime
+from app.services.zone_notification_service import get_alert_emails_for_camera
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -282,6 +283,9 @@ async def start_live_detection(
             detail="Camera must be active to start live detection",
         )
 
+    # Resolve all alert recipients: current user + company admins + zone officer
+    alert_emails = get_alert_emails_for_camera(db, camera, current_user.email)
+
     ok, msg = live_camera_runtime.start_live(
         camera.id,
         camera.stream_url or "",
@@ -290,6 +294,7 @@ async def start_live_detection(
         notify_alert_preference=getattr(current_user, "alert_preference", None) or "email",
         notify_user_phone=getattr(current_user, "phone_number", None),
         camera_name=camera.name or "",
+        notify_extra_emails=alert_emails,
     )
     if not ok:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)

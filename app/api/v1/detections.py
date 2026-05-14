@@ -31,6 +31,7 @@ from app.services.detection_service import detection_service
 from app.services.email_service import email_service
 from app.services.video_service import video_service
 from app.services.violence_model import ViolenceClassifier
+from app.services.zone_notification_service import get_alert_emails_for_camera
 
 router = APIRouter(prefix="/detections", tags=["detections"])
 
@@ -96,8 +97,11 @@ async def create_detection(
         evidence = db.query(Evidence).filter(Evidence.detection_id == db_detection.id).first()
         snapshot_path = evidence.image_path if evidence else None
 
+        # Resolve all recipients: current user + company admins + zone officer
+        alert_emails = get_alert_emails_for_camera(db, camera, current_user.email)
+
         email_sent = await email_service.send_alert_email(
-            to_emails=[current_user.email],
+            to_emails=alert_emails,
             subject=alert.title,
             message=alert.message or f"Alert for detection {db_detection.id}",
             snapshot_path=snapshot_path,
@@ -106,12 +110,13 @@ async def create_detection(
                 "Threat Level": db_detection.threat_level.value,
                 "Confidence": f"{db_detection.confidence:.2%}",
                 "Camera": camera.name,
+                "Zone": camera.zone or "—",
                 "Timestamp": db_detection.frame_timestamp.isoformat(),
             },
         )
         if email_sent:
             alert.email_sent = True
-            alert.email_sent_to = current_user.email
+            alert.email_sent_to = ", ".join(alert_emails)
             alert.email_sent_at = datetime.utcnow()
 
         db.commit()

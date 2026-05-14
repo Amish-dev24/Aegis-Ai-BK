@@ -857,10 +857,32 @@ class DetectionService:
 
                 vc = VC()
                 ckpt = torch.load(str(violence_pt_path), map_location="cpu", weights_only=False)
-                state = ckpt.get("model_state") or ckpt.get("state_dict")
+
+                # Resolve state dict from all common checkpoint save formats:
+                # 1. Direct state dict (torch.save(model.state_dict(), path))
+                # 2. Nested under common keys used by different training scripts
+                def _resolve_state(obj):
+                    if not isinstance(obj, dict):
+                        return None
+                    for key in ("model_state_dict", "model_state", "state_dict", "model", "weights"):
+                        if key in obj:
+                            return obj[key]
+                    # If every value is a tensor the dict IS the state dict
+                    if all(isinstance(v, torch.Tensor) for v in obj.values()):
+                        return obj
+                    return None
+
+                state = _resolve_state(ckpt)
                 if state is None:
-                    raise KeyError("checkpoint missing model_state / state_dict")
-                vc.load_state_dict(state, strict=True)
+                    raise KeyError(
+                        f"Cannot find state dict in checkpoint. Top-level keys: {list(ckpt.keys()) if isinstance(ckpt, dict) else type(ckpt)}"
+                    )
+                # strict=False tolerates minor mismatches (e.g. extra/missing BN running stats)
+                missing, unexpected = vc.load_state_dict(state, strict=False)
+                if missing:
+                    logger.warning("Violence model: missing keys: %s", missing)
+                if unexpected:
+                    logger.warning("Violence model: unexpected keys: %s", unexpected)
                 vc.eval()
                 logger.info(
                     "Violence model loaded from PyTorch: %s (val acc: %.1f%%)",

@@ -1,5 +1,15 @@
 """
 Background live-detection workers (one thread per camera_id).
+
+Architecture (two-thread design):
+  ┌─────────────────────┐     latest frame      ┌─────────────────────┐
+  │  _FrameReaderThread  │ ──────────────────▶  │  _InferenceThread    │
+  │  reads at camera FPS │                       │  runs AI at proc_fps │
+  │  publishes preview   │                       │  persists detections │
+  └─────────────────────┘                       └─────────────────────┘
+
+This keeps the MJPEG preview at full camera FPS (≈ real CCTV) while AI
+inference runs at the configurable process_fps without blocking the reader.
 """
 
 from __future__ import annotations
@@ -7,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
@@ -27,10 +37,34 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _sessions: dict[int, "_LiveSession"] = {}
 
-# Latest decoded BGR frame per camera from the live worker — lets /preview reuse one RTSP
-# decoder when live detection is on (many cameras choke on two simultaneous clients).
+# Latest decoded BGR frame per camera — shared between reader thread and preview endpoint.
 _preview_lock = threading.Lock()
 _preview_last: dict[int, tuple[float, np.ndarray]] = {}
+
+
+class _LatestFrame:
+    """Thread-safe single-slot buffer: reader writes at camera FPS, inference reads when ready."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._frame: Optional[np.ndarray] = None
+        self._ts: Optional[datetime] = None
+        self._event = threading.Event()
+
+    def put(self, frame: np.ndarray, ts: datetime) -> None:
+        with self._lock:
+            self._frame = frame
+            self._ts = ts
+        self._event.set()
+
+    def get(self, timeout: float = 1.0) -> tuple[Optional[np.ndarray], Optional[datetime]]:
+        self._event.wait(timeout=timeout)
+        with self._lock:
+            f, t = self._frame, self._ts
+            self._frame = None
+            self._ts = None
+            self._event.clear()
+        return f, t
 
 
 def _publish_live_preview_frame(camera_id: int, frame: np.ndarray) -> None:
@@ -78,6 +112,170 @@ class _LiveSession:
     last_error: Optional[str] = None
 
 
+def _frame_reader(
+    camera_id: int,
+    stream_url: str,
+    stop: threading.Event,
+    slot: _LatestFrame,
+) -> None:
+    """
+    Dedicated reader thread: pulls frames from the RTSP/HTTP source at full
+    camera FPS and writes each to *slot* + the shared preview buffer.
+    Completely independent of AI inference speed.
+    """
+    cap = open_stream_capture(stream_url)
+    if not cap.isOpened():
+        with _lock:
+            s = _sessions.get(camera_id)
+            if s:
+                s.last_error = "Failed to open stream"
+        logger.warning("live reader: camera %s open failed", camera_id)
+        return
+
+    logger.info("live reader started: camera %s", camera_id)
+    consecutive_failures = 0
+
+    while not stop.is_set():
+        ok, frame = cap.read()
+        if not ok or frame is None or getattr(frame, "size", 0) == 0:
+            consecutive_failures += 1
+            if consecutive_failures > 30:
+                logger.warning("live reader: too many failures for camera %s, stopping", camera_id)
+                with _lock:
+                    s = _sessions.get(camera_id)
+                    if s:
+                        s.last_error = "Stream read failed repeatedly"
+                break
+            time.sleep(0.05)
+            continue
+
+        fh, fw = int(frame.shape[0]), int(frame.shape[1])
+        if fh < 32 or fw < 32:
+            continue
+
+        consecutive_failures = 0
+        now = datetime.utcnow()
+
+        with _lock:
+            s = _sessions.get(camera_id)
+            if s:
+                s.last_frame_at = now
+
+        # Publish for MJPEG preview at full camera FPS
+        _publish_live_preview_frame(camera_id, frame)
+        # Signal the inference thread
+        slot.put(frame.copy(), now)
+
+    cap.release()
+    logger.info("live reader stopped: camera %s", camera_id)
+
+
+def _inference_worker(
+    camera_id: int,
+    process_fps: float,
+    stop: threading.Event,
+    slot: _LatestFrame,
+    notify_user_email: Optional[str],
+    notify_alert_preference: str,
+    notify_user_phone: Optional[str],
+    camera_name: str,
+    notify_extra_emails: Optional[list[str]] = None,
+) -> None:
+    """
+    Inference thread: consumes frames from *slot* at *process_fps* rate and
+    runs all enabled AI modules. Does NOT touch the RTSP stream directly.
+    """
+    min_interval = max(0.05, 1.0 / max(process_fps, 0.1))
+
+    live_notify = None
+    if notify_user_email:
+        live_notify = {
+            "user_email": notify_user_email,
+            "user_alert_preference": notify_alert_preference or "email",
+            "user_phone": notify_user_phone or "",
+            "camera_name": camera_name or "",
+            "extra_emails": list(notify_extra_emails) if notify_extra_emails else [],
+        }
+
+    buf_max = 0
+    prev_buf: list = []
+    object_history: dict[str, list[datetime]] = {}
+
+    logger.info("live inference started: camera %s @ %.1f fps", camera_id, process_fps)
+
+    while not stop.is_set():
+        loop_start = time.monotonic()
+
+        frame, now = slot.get(timeout=1.0)
+        if frame is None or stop.is_set():
+            continue
+
+        db = SessionLocal()
+        try:
+            cam = db.query(Camera).filter(Camera.id == camera_id).first()
+            if not cam or not cam.is_active:
+                break
+
+            enabled_now = detection_service.get_enabled_modules(db, cam.company_id)
+            need_buf = live_prior_frames_capacity(process_fps, "violence" in enabled_now)
+            if need_buf != buf_max:
+                buf_max = need_buf
+            if buf_max == 0:
+                prev_buf.clear()
+            else:
+                while len(prev_buf) > buf_max:
+                    prev_buf.pop(0)
+
+            prior_snap = [x.copy() for x in prev_buf] if buf_max > 0 else []
+
+            dc, ac, _ = persist_detections_for_live_frame(
+                db,
+                cam,
+                frame,
+                now,
+                previous_frames=prior_snap if prior_snap else None,
+                live_notify=live_notify,
+                object_history=object_history,
+            )
+            db.commit()
+
+            with _lock:
+                ss = _sessions.get(camera_id)
+                if ss:
+                    ss.frames_processed += 1
+                    ss.detections_total += dc
+                    ss.alerts_total += ac
+                    if dc > 0:
+                        ss.last_detection_at = now
+                    ss.last_error = None
+
+        except Exception as e:
+            logger.exception("live inference error camera=%s", camera_id)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            with _lock:
+                ss = _sessions.get(camera_id)
+                if ss:
+                    ss.last_error = str(e)[:240]
+        finally:
+            db.close()
+
+        if buf_max > 0:
+            prev_buf.append(frame.copy())
+            while len(prev_buf) > buf_max:
+                prev_buf.pop(0)
+
+        # Throttle inference to process_fps; remaining time is spent waiting for next frame
+        elapsed = time.monotonic() - loop_start
+        remaining = min_interval - elapsed
+        if remaining > 0:
+            stop.wait(timeout=remaining)
+
+    logger.info("live inference stopped: camera %s", camera_id)
+
+
 def _worker(
     camera_id: int,
     stream_url: str,
@@ -87,115 +285,38 @@ def _worker(
     notify_alert_preference: str,
     notify_user_phone: Optional[str],
     camera_name: str,
+    notify_extra_emails: Optional[list[str]] = None,
 ) -> None:
-    min_interval = max(0.05, 1.0 / max(process_fps, 0.1))
-    cap = open_stream_capture(stream_url)
+    """
+    Entry point called by the session thread. Spawns a reader sub-thread for
+    full-FPS capture and runs inference in the current thread.
+    """
+    slot = _LatestFrame()
 
-    live_notify = None
-    if notify_user_email:
-        live_notify = {
-            "user_email": notify_user_email,
-            "user_alert_preference": notify_alert_preference or "email",
-            "user_phone": notify_user_phone or "",
-            "camera_name": camera_name or "",
-        }
-
-    buf_max = 0
-    prev_buf: list = []
-    object_history: dict[str, list[datetime]] = {}
+    reader = threading.Thread(
+        target=_frame_reader,
+        args=(camera_id, stream_url, stop, slot),
+        name=f"aegis-reader-{camera_id}",
+        daemon=True,
+    )
+    reader.start()
 
     try:
-        if not cap.isOpened():
-            with _lock:
-                s = _sessions.get(camera_id)
-                if s:
-                    s.last_error = "Failed to open stream"
-            logger.warning("live detection: camera %s open failed", camera_id)
-            return
-
-        while not stop.is_set():
-            loop_start = time.monotonic()
-            ok, frame = cap.read()
-            now = datetime.utcnow()
-            with _lock:
-                s = _sessions.get(camera_id)
-                if s:
-                    s.last_frame_at = now
-
-            if not ok or frame is None or getattr(frame, "size", 0) == 0:
-                time.sleep(0.5)
-                continue
-
-            fh, fw = int(frame.shape[0]), int(frame.shape[1])
-            if fh < 32 or fw < 32:
-                time.sleep(0.05)
-                continue
-
-            _publish_live_preview_frame(camera_id, frame)
-
-            db = SessionLocal()
-            try:
-                cam = db.query(Camera).filter(Camera.id == camera_id).first()
-                if not cam or not cam.is_active:
-                    break
-
-                enabled_now = detection_service.get_enabled_modules(db, cam.company_id)
-                need_buf = live_prior_frames_capacity(process_fps, "violence" in enabled_now)
-                if need_buf != buf_max:
-                    buf_max = need_buf
-                if buf_max == 0:
-                    prev_buf.clear()
-                else:
-                    while len(prev_buf) > buf_max:
-                        prev_buf.pop(0)
-
-                prior_snap = [x.copy() for x in prev_buf] if buf_max > 0 else []
-
-                dc, ac, _ = persist_detections_for_live_frame(
-                    db,
-                    cam,
-                    frame,
-                    now,
-                    previous_frames=prior_snap if prior_snap else None,
-                    live_notify=live_notify,
-                    object_history=object_history,
-                )
-                db.commit()
-
-                with _lock:
-                    ss = _sessions.get(camera_id)
-                    if ss:
-                        ss.frames_processed += 1
-                        ss.detections_total += dc
-                        ss.alerts_total += ac
-                        if dc > 0:
-                            ss.last_detection_at = now
-                        ss.last_error = None
-            except Exception as e:
-                logger.exception("live detection frame error camera=%s", camera_id)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                with _lock:
-                    ss = _sessions.get(camera_id)
-                    if ss:
-                        ss.last_error = str(e)[:240]
-            finally:
-                db.close()
-
-            if buf_max > 0:
-                prev_buf.append(frame.copy())
-                while len(prev_buf) > buf_max:
-                    prev_buf.pop(0)
-
-            elapsed = time.monotonic() - loop_start
-            remaining = min_interval - elapsed
-            if remaining > 0:
-                stop.wait(timeout=remaining)
+        _inference_worker(
+            camera_id=camera_id,
+            process_fps=process_fps,
+            stop=stop,
+            slot=slot,
+            notify_user_email=notify_user_email,
+            notify_alert_preference=notify_alert_preference,
+            notify_user_phone=notify_user_phone,
+            camera_name=camera_name,
+            notify_extra_emails=notify_extra_emails,
+        )
     finally:
+        stop.set()          # ensure reader also exits
+        reader.join(timeout=6.0)
         _clear_live_preview_frame(camera_id)
-        cap.release()
         with _lock:
             _sessions.pop(camera_id, None)
 
@@ -209,6 +330,7 @@ def start_live(
     notify_alert_preference: str = "email",
     notify_user_phone: Optional[str] = None,
     camera_name: str = "",
+    notify_extra_emails: Optional[list[str]] = None,
 ) -> tuple[bool, str]:
     if not stream_url or not stream_url.strip():
         return False, "Camera has no stream_url configured"
@@ -228,6 +350,7 @@ def start_live(
                 notify_alert_preference,
                 notify_user_phone,
                 camera_name,
+                list(notify_extra_emails) if notify_extra_emails else [],
             ),
             name=f"aegis-live-camera-{camera_id}",
             daemon=True,

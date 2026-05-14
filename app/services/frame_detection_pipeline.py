@@ -231,6 +231,16 @@ def persist_detections_for_live_frame(
                 try:
                     from app.api.v1.video_processing import _email_queue, _ensure_email_thread
 
+                    # Merge primary user email with extra recipients (admins + zone officer)
+                    primary_email = live_notify["user_email"]
+                    extra_emails: list[str] = live_notify.get("extra_emails") or []
+                    seen_emails: set[str] = set()
+                    all_emails: list[str] = []
+                    for addr in [primary_email, *extra_emails]:
+                        if addr and addr not in seen_emails:
+                            seen_emails.add(addr)
+                            all_emails.append(addr)
+
                     _ensure_email_thread()
                     _email_queue.put(
                         {
@@ -238,7 +248,7 @@ def persist_detections_for_live_frame(
                             "alert_preference": live_notify.get("user_alert_preference", "email"),
                             "sms_number": live_notify.get("user_phone", "") or "",
                             "kwargs": {
-                                "to_emails": [live_notify["user_email"]],
+                                "to_emails": all_emails,
                                 "subject": alert.title,
                                 "message": alert.message,
                                 "snapshot_path": snapshot_path,
@@ -247,6 +257,7 @@ def persist_detections_for_live_frame(
                                     "Threat Level": threat_level.value,
                                     "Confidence": f"{confidence:.2%}",
                                     "Camera": live_notify.get("camera_name", ""),
+                                    "Zone": camera.zone or "—",
                                     "Timestamp": timestamp.isoformat(),
                                 },
                             },
@@ -271,26 +282,46 @@ def persist_detections_for_live_frame(
     return detections_created, alerts_created, detection_results
 
 
-def open_stream_capture(stream_url: str) -> cv2.VideoCapture:
+def open_stream_capture(stream_url: str, low_latency: bool = True) -> cv2.VideoCapture:
     """
-    Open a live URL with settings that reduce RTSP lag and jitter where the
-    OpenCV/FFmpeg build supports them.
+    Open a live URL with settings that minimise RTSP lag.
+
+    ``low_latency=True`` (default for live streams):
+    - Buffer size 1 — always decode the newest frame, never a stale one.
+    - ``fflags nobuffer`` + ``flags low_delay`` — tell FFmpeg to skip
+      input buffering and reduce its internal pipeline latency.
+    - ``probesize`` / ``analyzeduration`` reduced so the stream opens
+      faster (typically shaves 1-3 s off initial connection time).
     """
     url = (stream_url or "").strip()
     if not url:
         return cv2.VideoCapture()
+
     if url.lower().startswith("rtsp://"):
         opts_parts = ["rtsp_transport;tcp"]
+
+        if low_latency:
+            # Minimise FFmpeg's internal buffering for real-time playback
+            opts_parts += [
+                "fflags;nobuffer",          # skip input buffering
+                "flags;low_delay",          # enable low-delay decoding
+                "probesize;32",             # tiny probe (bytes) — fast open
+                "analyzeduration;0",        # no pre-analysis delay
+                "reorder_queue_size;0",     # no packet reorder buffer
+            ]
+
         extra = str(getattr(settings, "RTSP_FFMPEG_CAPTURE_OPTIONS", "") or "").strip()
         for segment in extra.split("|"):
             seg = segment.strip()
             if seg:
                 opts_parts.append(seg)
-        # Per-open URL options (OpenCV FFmpeg); env is process-global.
+
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(opts_parts)
+
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     if cap.isOpened():
-        buf = int(getattr(settings, "RTSP_CAPTURE_BUFFER_SIZE", 2))
+        # Buffer=1: reader always gets the most recent frame, not a queued-up old one
+        buf = 1 if low_latency else int(getattr(settings, "RTSP_CAPTURE_BUFFER_SIZE", 2))
         buf = max(1, min(buf, 16))
         cap.set(cv2.CAP_PROP_BUFFERSIZE, buf)
     return cap

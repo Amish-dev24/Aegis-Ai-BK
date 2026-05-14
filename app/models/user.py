@@ -34,6 +34,7 @@ class User(Base):
     alert_preference = Column(
         String(20), default="email", nullable=False
     )  # "email", "email_sms", "sms"
+    zone = Column(String(100), nullable=True, index=True)  # Assigned zone (e.g. "Lobby", "Gate A")
     role = Column(Enum(Role), default=Role.SECURITY_OFFICER, nullable=False)
     company_id = Column(
         Integer, ForeignKey("companies.id"), nullable=True, index=True

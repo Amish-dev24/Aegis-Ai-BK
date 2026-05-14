@@ -18,6 +18,7 @@ class UserBase(BaseModel):
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
     alert_preference: str = "email"  # "email", "email_sms", "sms"
+    zone: Optional[str] = None  # Assigned zone label (e.g. "Lobby", "Gate A")
     role: Role = Role.VIEWER
 
 
@@ -30,6 +31,7 @@ class UserSignup(BaseModel):
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
     alert_preference: str = "email"
+    zone: Optional[str] = None
     company_id: Optional[int] = None
 
 
@@ -47,6 +49,7 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
     alert_preference: Optional[str] = None
+    zone: Optional[str] = None
     role: Optional[Role] = None
     is_active: Optional[bool] = None
     admin_verified: Optional[bool] = None
@@ -61,6 +64,7 @@ class UserResponse(UserBase):
 
     id: int
     company_id: Optional[int] = None
+    zone: Optional[str] = None
     is_active: bool
     admin_verified: bool = False
     email_verified: bool = False

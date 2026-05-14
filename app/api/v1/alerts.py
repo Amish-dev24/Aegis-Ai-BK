@@ -34,6 +34,7 @@ from app.schemas.alert import (
     AlertUpdate,
 )
 from app.services.email_service import email_service
+from app.services.zone_notification_service import get_alert_emails_for_camera
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -171,8 +172,14 @@ async def create_alert(
         evidence = db.query(Evidence).filter(Evidence.detection_id == detection.id).first()
         snapshot_path = evidence.image_path if evidence else None
 
+        # Resolve camera for zone lookup
+        camera = db.query(Camera).filter(Camera.id == detection.camera_id).first()
+
+        # All recipients: current user + company admins + zone officer
+        alert_emails = get_alert_emails_for_camera(db, camera, current_user.email) if camera else [current_user.email]
+
         await email_service.send_alert_email(
-            to_emails=[current_user.email],
+            to_emails=alert_emails,
             subject=db_alert.title,
             message=db_alert.message or f"Alert for detection {detection.id}",
             snapshot_path=snapshot_path,
@@ -180,11 +187,13 @@ async def create_alert(
                 "Detection Type": detection.detection_type.value,
                 "Threat Level": detection.threat_level.value,
                 "Confidence": f"{detection.confidence:.2%}",
+                "Camera": camera.name if camera else "—",
+                "Zone": (camera.zone or "—") if camera else "—",
                 "Timestamp": detection.frame_timestamp.isoformat(),
             },
         )
         db_alert.email_sent = True
-        db_alert.email_sent_to = current_user.email
+        db_alert.email_sent_to = ", ".join(alert_emails)
         db_alert.email_sent_at = datetime.utcnow()
         db.commit()
 
