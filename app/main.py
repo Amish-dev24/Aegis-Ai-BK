@@ -58,6 +58,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Inference executor shutdown: %s", e)
 
+    try:
+        from app.services import live_camera_runtime
+
+        live_camera_runtime.shutdown_all()
+    except Exception as e:
+        logger.warning("Live camera runtime shutdown: %s", e)
+
 
 app = FastAPI(
     title="Aegis AI - Intelligent Surveillance Platform",

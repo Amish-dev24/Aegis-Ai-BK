@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.security import require_any_authenticated
 from app.database import get_db
 from app.models.notification_feed import NotificationAudience, NotificationFeed
-from app.models.user import Role, User
+from app.models.user import User
 from app.schemas.notification_feed import NotificationFeedResponse
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -24,12 +24,6 @@ async def list_notification_feed(
     Uses the same JWT session as alerts so other users polling this endpoint see updates
     when an admin toggles global or company detection modules.
     """
-    q = db.query(NotificationFeed).order_by(NotificationFeed.created_at.desc())
-
-    if current_user.role == Role.AEGIS_ADMIN:
-        rows = q.limit(limit).all()
-        return rows
-
     audience_filters = [NotificationFeed.audience == NotificationAudience.PLATFORM.value]
     if current_user.company_id:
         audience_filters.append(

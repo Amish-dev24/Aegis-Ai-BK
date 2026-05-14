@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.security import (
-    check_company_access,
+    check_directory_company_access,
+    get_directory_company_filter,
     get_password_hash,
     require_admin,
 )
@@ -25,19 +26,28 @@ async def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
     company_id: Optional[int] = Query(
-        None, description="Filter by company ID (Aegis AI admin only)"
+        None, description="Filter by company ID (aegis_admin only; omit for all companies)"
     ),
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    """List users (admin only). Company admins see only their company's users."""
-    query = db.query(User)
+    """List users (admin only).
 
+    - **Company admin**: always scoped to their company (optional ``company_id`` must match).
+    - **Aegis admin**: pass ``company_id`` to list one tenant; omit it for a platform-wide list
+      (e.g. global verification, dashboard pending counts).
+    """
     if current_user.role == Role.AEGIS_ADMIN:
-        if company_id:
-            query = query.filter(User.company_id == company_id)
+        if company_id is not None:
+            query = db.query(User).filter(User.company_id == company_id)
+        else:
+            query = db.query(User)
     else:
-        query = query.filter(User.company_id == current_user.company_id)
+        company_filter = get_directory_company_filter(current_user, company_id)
+        if company_filter is None:
+            return []
+
+        query = db.query(User).filter(User.company_id == company_filter)
 
     users = query.order_by(User.id).offset(offset).limit(limit).all()
     return users
@@ -53,7 +63,7 @@ async def get_user(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     # Check company access
-    if user.company_id and not check_company_access(current_user, user.company_id):
+    if user.company_id and not check_directory_company_access(current_user, user.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions to access this user",
@@ -76,7 +86,7 @@ async def update_user(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     # Check company access
-    if user.company_id and not check_company_access(current_user, user.company_id):
+    if user.company_id and not check_directory_company_access(current_user, user.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions to update this user",
@@ -195,7 +205,7 @@ async def delete_user(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     # Check company access
-    if user.company_id and not check_company_access(current_user, user.company_id):
+    if user.company_id and not check_directory_company_access(current_user, user.company_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions to delete this user",

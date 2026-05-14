@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.security import (
-    check_company_access,
+    check_directory_company_access,
     require_admin,
     require_aegis_admin,
 )
@@ -103,7 +103,7 @@ async def list_company_settings(
     current_user: User = Depends(require_admin),
 ):
     """List detection settings for a company."""
-    if not check_company_access(current_user, company_id):
+    if not check_directory_company_access(current_user, company_id):
         raise HTTPException(status_code=403, detail="No access to this company")
 
     return (
@@ -124,7 +124,7 @@ async def create_company_setting(
     current_user: User = Depends(require_admin),
 ):
     """Create a detection setting for a company module."""
-    if not check_company_access(current_user, company_id):
+    if not check_directory_company_access(current_user, company_id):
         raise HTTPException(status_code=403, detail="No access to this company")
 
     if data.module_name not in VALID_MODULES:
@@ -173,7 +173,7 @@ async def update_company_setting(
     current_user: User = Depends(require_admin),
 ):
     """Update a company's detection module settings (toggle, thresholds)."""
-    if not check_company_access(current_user, company_id):
+    if not check_directory_company_access(current_user, company_id):
         raise HTTPException(status_code=403, detail="No access to this company")
 
     if module_name not in VALID_MODULES:
@@ -220,7 +220,7 @@ async def delete_company_setting(
     current_user: User = Depends(require_admin),
 ):
     """Delete a company module setting (resets to global defaults)."""
-    if not check_company_access(current_user, company_id):
+    if not check_directory_company_access(current_user, company_id):
         raise HTTPException(status_code=403, detail="No access to this company")
 
     setting = (

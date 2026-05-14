@@ -2,7 +2,7 @@
 Detection service for integrating with AI models.
 
 Models used:
-- weapon-box-bags-v3.pt (YOLO) — Bags, Box, Weapons
+- weapon_detection_v4.pt (YOLO) — Bags, Box, Weapons
 - face_detection.pt    (YOLOv8) — classes: {0: covered, 1: uncovered}
 - csrnet_crowd.pth.tar (CSRNet) or sanet_partB_best.pth (SANet) — crowd density
 - MediaPipe Pose       (optional) — violence / aggression detection
@@ -37,14 +37,27 @@ from app.services.violence_model import ViolenceClassifier
 
 logger = logging.getLogger(__name__)
 
-# weapon-box-bags-v3.pt — class names in the checkpoint (Ultralytics val table):
+
+def _normalize_model_confidence(v: Optional[float]) -> Optional[float]:
+    """Coerce stored confidence to 0–1: values > 1 (up to 100) are treated as percent (20 → 0.2)."""
+    if v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    if x > 1.0:
+        x = x / 100.0
+    return max(0.0, min(1.0, x))
+
+# weapon_detection_v4.pt — expected class names (Ultralytics val table; adjust if your v4 differs):
 #   Bags | Box | Weapons
 # Routing: Weapons → weapon detections; Bags + Box → abandoned / bags_boxes.
 _BAG_BOX_CLASS_NAMES = frozenset({"bags", "bag", "box", "boxes"})
 
 
 def _is_weapon_class(cls_name: str) -> bool:
-    """True if this label is the weapon class (primary: ``Weapons`` from weapon-box-bags-v3)."""
+    """True if this label is the weapon class (primary: ``Weapons`` from weapon_detection_v4)."""
     n = cls_name.lower().strip()
     if not n:
         return False
@@ -844,10 +857,32 @@ class DetectionService:
 
                 vc = VC()
                 ckpt = torch.load(str(violence_pt_path), map_location="cpu", weights_only=False)
-                state = ckpt.get("model_state") or ckpt.get("state_dict")
+
+                # Resolve state dict from all common checkpoint save formats:
+                # 1. Direct state dict (torch.save(model.state_dict(), path))
+                # 2. Nested under common keys used by different training scripts
+                def _resolve_state(obj):
+                    if not isinstance(obj, dict):
+                        return None
+                    for key in ("model_state_dict", "model_state", "state_dict", "model", "weights"):
+                        if key in obj:
+                            return obj[key]
+                    # If every value is a tensor the dict IS the state dict
+                    if all(isinstance(v, torch.Tensor) for v in obj.values()):
+                        return obj
+                    return None
+
+                state = _resolve_state(ckpt)
                 if state is None:
-                    raise KeyError("checkpoint missing model_state / state_dict")
-                vc.load_state_dict(state, strict=True)
+                    raise KeyError(
+                        f"Cannot find state dict in checkpoint. Top-level keys: {list(ckpt.keys()) if isinstance(ckpt, dict) else type(ckpt)}"
+                    )
+                # strict=False tolerates minor mismatches (e.g. extra/missing BN running stats)
+                missing, unexpected = vc.load_state_dict(state, strict=False)
+                if missing:
+                    logger.warning("Violence model: missing keys: %s", missing)
+                if unexpected:
+                    logger.warning("Violence model: unexpected keys: %s", unexpected)
                 vc.eval()
                 logger.info(
                     "Violence model loaded from PyTorch: %s (val acc: %.1f%%)",
@@ -1122,8 +1157,13 @@ class DetectionService:
                     all_results.append((DetectionType.CROWD_DENSITY, crowd_out))
 
         if "violence" in enabled_modules:
+            v_thr = enabled_modules.get("violence", {}).get("min_confidence")
             futures["violence"] = self._inference_pool.submit(
-                self.detect_violence, frame, previous_frames, frame_timestamp
+                self.detect_violence,
+                frame,
+                previous_frames,
+                frame_timestamp,
+                prob_threshold=v_thr,
             )
 
         # Step 3: Collect results
@@ -1270,6 +1310,8 @@ class DetectionService:
         frame: np.ndarray,
         previous_frames: list[np.ndarray],
         frame_timestamp: datetime,
+        *,
+        prob_threshold: Optional[float] = None,
     ) -> dict[str, Any]:
         """
         Detect violent behaviour using trained Conv3D classifier.
@@ -1277,9 +1319,17 @@ class DetectionService:
         Model trained on Real Life Violence Situations Dataset (~89.8% accuracy).
         Falls back to optical flow if Conv3D model not available.
         When violent, adds a motion-based ``bbox`` for on-frame annotation.
+
+        ``prob_threshold``: minimum P(violence) after softmax to set ``is_violent``; defaults to
+        ``VIOLENCE_DEFAULT_PROB_THRESHOLD``. Pass company's ``min_confidence`` for that module
+        so a 0.2 (20%) tenant setting actually lowers the model cutoff (not only a post-filter).
         """
         # ── Primary: Conv3D trained model ──
-        thr = float(getattr(settings, "VIOLENCE_DEFAULT_PROB_THRESHOLD", 0.5))
+        thr = (
+            float(prob_threshold)
+            if prob_threshold is not None
+            else float(getattr(settings, "VIOLENCE_DEFAULT_PROB_THRESHOLD", 0.5))
+        )
         if self.violence_onnx_session is not None or self.violence_pt_model is not None:
             n = ViolenceClassifier.NUM_FRAMES
             # Chronological: all priors + current. At high analysis FPS, priors span a long buffer;
@@ -1969,7 +2019,7 @@ class DetectionService:
                 thresholds["critical_threshold"] = cs.critical_threshold
                 thresholds["high_threshold"] = cs.high_threshold
                 thresholds["medium_threshold"] = cs.medium_threshold
-                thresholds["min_confidence"] = cs.min_confidence
+                thresholds["min_confidence"] = _normalize_model_confidence(cs.min_confidence)
                 thresholds["alert_on_levels"] = cs.alert_on_levels or "medium,high,critical"
                 if cs.abandoned_seconds:
                     thresholds["abandoned_seconds"] = cs.abandoned_seconds

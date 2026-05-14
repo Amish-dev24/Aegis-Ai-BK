@@ -25,12 +25,13 @@ from app.models.camera import Camera
 from app.models.detection import Detection, DetectionType, ThreatLevel
 from app.models.detection_settings import CompanyDetectionSettings, GlobalModuleSettings
 from app.models.evidence import Evidence
-from app.models.user import Role, User
+from app.models.user import User
 from app.schemas.detection import DetectionCreate, DetectionFilter, DetectionResponse
 from app.services.detection_service import detection_service
 from app.services.email_service import email_service
 from app.services.video_service import video_service
 from app.services.violence_model import ViolenceClassifier
+from app.services.zone_notification_service import get_alert_emails_for_camera
 
 router = APIRouter(prefix="/detections", tags=["detections"])
 
@@ -96,8 +97,11 @@ async def create_detection(
         evidence = db.query(Evidence).filter(Evidence.detection_id == db_detection.id).first()
         snapshot_path = evidence.image_path if evidence else None
 
+        # Resolve all recipients: current user + company admins + zone officer
+        alert_emails = get_alert_emails_for_camera(db, camera, current_user.email)
+
         email_sent = await email_service.send_alert_email(
-            to_emails=[current_user.email],
+            to_emails=alert_emails,
             subject=alert.title,
             message=alert.message or f"Alert for detection {db_detection.id}",
             snapshot_path=snapshot_path,
@@ -106,12 +110,13 @@ async def create_detection(
                 "Threat Level": db_detection.threat_level.value,
                 "Confidence": f"{db_detection.confidence:.2%}",
                 "Camera": camera.name,
+                "Zone": camera.zone or "—",
                 "Timestamp": db_detection.frame_timestamp.isoformat(),
             },
         )
         if email_sent:
             alert.email_sent = True
-            alert.email_sent_to = current_user.email
+            alert.email_sent_to = ", ".join(alert_emails)
             alert.email_sent_at = datetime.utcnow()
 
         db.commit()
@@ -129,12 +134,10 @@ async def list_detections(
 ):
     """List detections with filtering. Company users see only their company's detections."""
     company_filter = get_user_company_filter(current_user, company_id)
-    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+    if company_filter is None:
         return []
 
-    query = db.query(Detection)
-    if company_filter is not None:
-        query = query.filter(Detection.company_id == company_filter)
+    query = db.query(Detection).filter(Detection.company_id == company_filter)
 
     if filter_params.camera_id:
         query = query.filter(Detection.camera_id == filter_params.camera_id)
@@ -278,7 +281,10 @@ async def process_video(
 
             # --- 2. Violence / aggression detection (MediaPipe + motion) ---
             if "violence" in enabled_modules:
-                violence = detection_service.detect_violence(frame, previous_frames, timestamp)
+                v_minc = enabled_modules["violence"].get("min_confidence")
+                violence = detection_service.detect_violence(
+                    frame, previous_frames, timestamp, prob_threshold=v_minc
+                )
                 if violence["is_violent"]:
                     all_raw_detections.append((DetectionType.VIOLENCE, violence))
 
@@ -488,7 +494,10 @@ async def process_image(
             all_raw_detections.append((DetectionType.WEAPON, det))
 
     if "violence" in enabled_modules:
-        violence = detection_service.detect_violence(frame, [], timestamp)
+        v_minc = enabled_modules.get("violence", {}).get("min_confidence")
+        violence = detection_service.detect_violence(
+            frame, [], timestamp, prob_threshold=v_minc
+        )
         if violence["is_violent"]:
             all_raw_detections.append((DetectionType.VIOLENCE, violence))
 
@@ -640,14 +649,13 @@ async def get_detection_stats(
     does not need to call multiple list endpoints and guess totals from page sizes.
 
     company_id behaviour:
-    - AEGIS_ADMIN + no company_id  → aggregate across ALL companies
-    - AEGIS_ADMIN + company_id     → scoped to that company
-    - Company user                 → always scoped to their company
+    - User with ``company_id`` → stats for that company only
+    - Unassigned user → empty summary
     """
     from datetime import timedelta
 
     company_filter = get_user_company_filter(current_user, company_id)
-    if company_filter is None and current_user.role != Role.AEGIS_ADMIN:
+    if company_filter is None:
         empty = {t.value: 0 for t in DetectionType}
         return {
             "total_detections": 0,
@@ -664,8 +672,7 @@ async def get_detection_stats(
 
     # --- Detection counts (2 GROUP BY queries) ---
     det_base = db.query(Detection).filter(Detection.detected_at >= start_date)
-    if company_filter is not None:
-        det_base = det_base.filter(Detection.company_id == company_filter)
+    det_base = det_base.filter(Detection.company_id == company_filter)
 
     by_type = {t.value: 0 for t in DetectionType}
     for det_type_val, count in (
@@ -690,59 +697,40 @@ async def get_detection_stats(
     ev_query = db.query(func.count(Evidence.id)).join(
         Detection, Evidence.detection_id == Detection.id
     )
-    if company_filter is not None:
-        ev_query = ev_query.filter(Detection.company_id == company_filter)
+    ev_query = ev_query.filter(Detection.company_id == company_filter)
     evidence_count = ev_query.scalar() or 0
 
     # --- Active cameras count ---
     cam_query = db.query(func.count(Camera.id)).filter(Camera.is_active.is_(True))
-    if company_filter is not None:
-        cam_query = cam_query.filter(Camera.company_id == company_filter)
+    cam_query = cam_query.filter(Camera.company_id == company_filter)
     active_cameras = cam_query.scalar() or 0
 
-    # --- AI modules count ---
-    # When viewing a specific company: count modules enabled for that company
-    # (company override takes precedence; fall back to global setting).
-    # When viewing all companies (AEGIS_ADMIN, no company_id): count globally enabled modules.
-    if company_filter is not None:
-        # Modules explicitly enabled at company level
-        company_enabled = (
-            db.query(func.count(CompanyDetectionSettings.id))
-            .filter(
-                CompanyDetectionSettings.company_id == company_filter,
-                CompanyDetectionSettings.is_enabled.is_(True),
-            )
-            .scalar()
-            or 0
+    # --- AI modules count (this company only) ---
+    company_enabled = (
+        db.query(func.count(CompanyDetectionSettings.id))
+        .filter(
+            CompanyDetectionSettings.company_id == company_filter,
+            CompanyDetectionSettings.is_enabled.is_(True),
         )
+        .scalar()
+        or 0
+    )
 
-        # Globally enabled modules that the company has NOT overridden
-        overridden_modules = [
-            r.module_name
-            for r in db.query(CompanyDetectionSettings.module_name)
-            .filter(CompanyDetectionSettings.company_id == company_filter)
-            .all()
-        ]
-        global_fallback_q = db.query(func.count(GlobalModuleSettings.id)).filter(
-            GlobalModuleSettings.is_enabled.is_(True)
+    overridden_modules = [
+        r.module_name
+        for r in db.query(CompanyDetectionSettings.module_name)
+        .filter(CompanyDetectionSettings.company_id == company_filter)
+        .all()
+    ]
+    global_fallback_q = db.query(func.count(GlobalModuleSettings.id)).filter(
+        GlobalModuleSettings.is_enabled.is_(True)
+    )
+    if overridden_modules:
+        global_fallback_q = global_fallback_q.filter(
+            GlobalModuleSettings.module_name.notin_(overridden_modules)
         )
-        if overridden_modules:
-            global_fallback_q = global_fallback_q.filter(
-                GlobalModuleSettings.module_name.notin_(overridden_modules)
-            )
-        global_fallback = global_fallback_q.scalar() or 0
-        ai_modules = company_enabled + global_fallback
-    else:
-        # All-companies view: count globally enabled modules
-        ai_modules = (
-            db.query(func.count(GlobalModuleSettings.id))
-            .filter(GlobalModuleSettings.is_enabled.is_(True))
-            .scalar()
-            or 0
-        )
-        # If no global settings exist yet, fall back to total DetectionType count
-        if ai_modules == 0 and db.query(func.count(GlobalModuleSettings.id)).scalar() == 0:
-            ai_modules = len(DetectionType)
+    global_fallback = global_fallback_q.scalar() or 0
+    ai_modules = company_enabled + global_fallback
 
     return {
         "total_detections": total_detections,

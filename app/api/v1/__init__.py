@@ -19,6 +19,7 @@ from app.api.v1 import (
     retention,
     users,
     video_processing,
+    zone_assignments,
 )
 
 api_router = APIRouter()
@@ -37,3 +38,4 @@ api_router.include_router(detection_settings.router)
 api_router.include_router(video_processing.router)
 api_router.include_router(retention.router)
 api_router.include_router(emergency_contacts.router)
+api_router.include_router(zone_assignments.router)

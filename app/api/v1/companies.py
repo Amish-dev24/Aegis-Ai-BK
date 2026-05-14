@@ -149,16 +149,17 @@ async def get_companies_stats(
 async def get_company(
     company_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)
 ):
-    """Get company details with user count. Admins can only see their own company."""
-    if not check_company_access(current_user, company_id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to access this company",
-        )
-
+    """Get company details with user count. Aegis admins may view any company; others only their own."""
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+
+    if current_user.role != Role.AEGIS_ADMIN:
+        if not check_company_access(current_user, company_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to access this company",
+            )
 
     # Count users
     user_count = db.query(func.count(User.id)).filter(User.company_id == company.id).scalar()
@@ -189,16 +190,17 @@ async def get_company(
 async def get_company_users(
     company_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)
 ):
-    """Get all users for a company. Admins can only see their own company's users."""
-    if not check_company_access(current_user, company_id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to access this company",
-        )
-
+    """Get all users for a company. Aegis admins may list any company; others only their own."""
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+
+    if current_user.role != Role.AEGIS_ADMIN:
+        if not check_company_access(current_user, company_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to access this company",
+            )
 
     users = db.query(User).filter(User.company_id == company_id).all()
 

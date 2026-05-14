@@ -46,6 +46,7 @@ from app.services.email_service import email_service
 from app.services.sms_service import send_alert_sms
 from app.services.video_service import video_service
 from app.services.violence_model import ViolenceClassifier
+from app.services.zone_notification_service import get_alert_emails_for_camera
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +80,10 @@ def _check_job_access(job: dict, current_user: User) -> None:
     """Raise 403 if the user is not allowed to access this job.
 
     Access rules:
-    - AEGIS_ADMIN  : unrestricted
-    - ADMIN        : any job belonging to their own company
+    - ADMIN / AEGIS_ADMIN : job must belong to their company
     - All others   : only jobs they personally submitted (user_id match)
     """
-    if current_user.role == Role.AEGIS_ADMIN:
-        return
-    if current_user.role == Role.ADMIN:
+    if current_user.role in (Role.ADMIN, Role.AEGIS_ADMIN):
         if job.get("company_id") == current_user.company_id:
             return
     elif job.get("user_id") == current_user.id:
@@ -332,7 +330,9 @@ async def start_video_processing(
         "user_email": current_user.email,
         "user_phone": current_user.phone_number or "",
         "user_alert_preference": getattr(current_user, "alert_preference", "email"),
+        "alert_emails": get_alert_emails_for_camera(db, camera, current_user.email),
         "camera_name": camera.name,
+        "camera_zone": camera.zone or "",
         "filename": video_file.filename,
         "upload_path": str(upload_path),
         # Processing options
@@ -554,7 +554,9 @@ def _run_analysis(
                 message=f"{det_type.value} detected with {confidence:.0%} confidence",
                 status=AlertStatus.PENDING,
             )
-            alert.email_sent_to = job["user_email"]
+            # Use pre-resolved recipient list (user + admins + zone officer)
+            alert_emails: list[str] = job.get("alert_emails") or [job["user_email"]]
+            alert.email_sent_to = ", ".join(alert_emails)
             db.add(alert)
             db.flush()
 
@@ -565,7 +567,7 @@ def _run_analysis(
                     "alert_preference": job.get("user_alert_preference", "email"),
                     "sms_number": job.get("user_phone", ""),
                     "kwargs": {
-                        "to_emails": [job["user_email"]],
+                        "to_emails": alert_emails,
                         "subject": alert.title,
                         "message": alert.message,
                         "snapshot_path": snapshot_path,
@@ -574,6 +576,7 @@ def _run_analysis(
                             "Threat Level": threat_level.value,
                             "Confidence": f"{confidence:.2%}",
                             "Camera": job["camera_name"],
+                            "Zone": job.get("camera_zone") or "—",
                             "Timestamp": timestamp.isoformat(),
                         },
                     },
@@ -1127,17 +1130,11 @@ async def list_jobs(
     """List all processing jobs for the current user."""
     results = []
     for job in _jobs.values():
-        # AEGIS_ADMIN sees every job
-        if current_user.role == Role.AEGIS_ADMIN:
-            pass
-        # Company ADMIN sees all jobs belonging to their company
-        elif current_user.role == Role.ADMIN:
+        if current_user.role in (Role.ADMIN, Role.AEGIS_ADMIN):
             if job.get("company_id") != current_user.company_id:
                 continue
-        # All other roles (SECURITY_OFFICER, VIEWER) see only their own jobs
-        else:
-            if job.get("user_id") != current_user.id:
-                continue
+        elif job.get("user_id") != current_user.id:
+            continue
 
         if status_filter and job["status"] != status_filter:
             continue

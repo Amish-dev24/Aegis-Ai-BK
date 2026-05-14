@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Aegis AI Security System"
 
     # Detection Models
-    MODEL_PATH: str = "./models/weapon-box-bags-v3.pt"  # YOLO — Bags, Box, Weapons (v3)
+    MODEL_PATH: str = "./models/weapon_detection_v4.pt"  # YOLO — weapon / bags / boxes (v4)
     FACE_MODEL_PATH: str = "./models/face_detection.pt"  # YOLOv8 — covered, uncovered
     # Prefer .pth + auto single-file ONNX if split .onnx/.onnx.data is broken; or set path to merged .onnx only
     CROWD_MODEL_PATH: str = "./models/sanet_partB_best.onnx"
@@ -88,9 +88,14 @@ class Settings(BaseSettings):
     VIOLENCE_MODEL_ONNX_PATH: Optional[str] = None
     # Min P(violence) to emit a violence detection (softmax index 1)
     VIOLENCE_DEFAULT_PROB_THRESHOLD: float = 0.5
+    # If set, live RTSP uses this threshold instead of VIOLENCE_DEFAULT_PROB_THRESHOLD (often slightly lower).
+    VIOLENCE_LIVE_PROB_THRESHOLD: Optional[float] = None
     # Seconds of *analyzed* frames to keep for violence; at high process_fps we subsample 16 frames
     # across this window (avoids 16 near-duplicate frames when analyzing every video frame).
     VIOLENCE_TEMPORAL_WINDOW_SECONDS: float = 2.0
+    # Live RTSP: floor for that window so high inference FPS (e.g. 10) still keeps ~3.5s+ of samples
+    # for Conv3D (file jobs unchanged — they use VIOLENCE_TEMPORAL_WINDOW_SECONDS only).
+    VIOLENCE_LIVE_TEMPORAL_WINDOW_SECONDS: float = 3.5
     VIOLENCE_HISTORY_MAX_FRAMES: int = 120
     # Device for violence: ONNX path uses ONNX_PREFER_GPU (same ORT session logic as crowd).
     # If ORT is unavailable and the .pt fallback runs, uses TORCH_PREFER_GPU + CUDA availability.
@@ -102,6 +107,13 @@ class Settings(BaseSettings):
     WEAPON_VIDEO_AI_MAX_SIDE: int = 640
     # Fixed export size for ONNX (must match exported graph)
     ONNX_YOLO_IMGSZ: int = 640
+    # OpenCV FFmpeg RTSP: buffer=1 minimizes latency but can cause H.264 “missing reference” logs / corrupt frames
+    # on lossy links; 2–3 usually stabilizes decoding at ~1–2 frames extra delay.
+    RTSP_CAPTURE_BUFFER_SIZE: int = 2
+    # Extra pairs for OpenCV ``OPENCV_FFMPEG_CAPTURE_OPTIONS`` joined with ``|``, each pair ``key;value``.
+    # Example: ``fflags;discardcorrupt`` (only if your OpenCV/FFmpeg build accepts it).
+    RTSP_FFMPEG_CAPTURE_OPTIONS: str = ""
+
     # ONNX Runtime: CUDA when ``onnxruntime-gpu`` + GPU visible (crowd + violence ONNX; CPU fallback on failure)
     ONNX_PREFER_GPU: bool = True
     # Ultralytics ``.pt`` / PyTorch weights: move to CUDA when available

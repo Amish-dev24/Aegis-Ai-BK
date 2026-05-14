@@ -22,7 +22,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import all models so Alembic can detect them
-from app.models import user, company, camera, detection, alert, evidence, audit_log, detection_settings
+from app.models import user, company, camera, detection, alert, evidence, audit_log, detection_settings, notification_feed
+from app.models import zone_officer_assignment  # noqa: F401 – ensures table is in metadata
 
 target_metadata = Base.metadata
 

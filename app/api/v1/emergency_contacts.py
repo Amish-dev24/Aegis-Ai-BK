@@ -9,13 +9,15 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.security import (
-    check_company_access,
+    check_directory_company_access,
+    get_directory_company_filter,
     require_admin,
     require_any_authenticated,
 )
 from app.database import get_db
+from app.models.company import Company
 from app.models.emergency_contact import EmergencyContact
-from app.models.user import User
+from app.models.user import Role, User
 
 router = APIRouter(prefix="/emergency-contacts", tags=["emergency-contacts"])
 
@@ -25,6 +27,7 @@ class EmergencyContactCreate(BaseModel):
     phone_number: str
     role: Optional[str] = None
     is_primary: bool = False
+    company_id: Optional[int] = None
 
 
 class EmergencyContactUpdate(BaseModel):
@@ -52,18 +55,12 @@ async def list_contacts(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_any_authenticated),
 ):
-    """List emergency contacts. Non-aegis users see only their own company."""
-    from app.models.user import Role
+    """List emergency contacts for the authenticated user's company."""
+    company_filter = get_directory_company_filter(current_user, company_id)
+    if company_filter is None:
+        return []
 
-    query = db.query(EmergencyContact)
-    if current_user.role == Role.AEGIS_ADMIN:
-        # Aegis admin: filter by company_id param if provided, else return empty (avoid leaking all)
-        if company_id:
-            query = query.filter(EmergencyContact.company_id == company_id)
-        else:
-            return []
-    else:
-        query = query.filter(EmergencyContact.company_id == current_user.company_id)
+    query = db.query(EmergencyContact).filter(EmergencyContact.company_id == company_filter)
     return query.order_by(EmergencyContact.is_primary.desc(), EmergencyContact.name).all()
 
 
@@ -74,11 +71,19 @@ async def create_contact(
     current_user: User = Depends(require_admin),
 ):
     """Add an emergency contact (admin only)."""
-    if not current_user.company_id:
-        raise HTTPException(status_code=400, detail="No company assigned")
+    if current_user.role == Role.AEGIS_ADMIN:
+        target_company_id = data.company_id or current_user.company_id
+        if target_company_id is None:
+            raise HTTPException(status_code=400, detail="company_id is required")
+        if not db.query(Company).filter(Company.id == target_company_id).first():
+            raise HTTPException(status_code=400, detail="Invalid company_id")
+    else:
+        if not current_user.company_id:
+            raise HTTPException(status_code=400, detail="No company assigned")
+        target_company_id = current_user.company_id
 
     contact = EmergencyContact(
-        company_id=current_user.company_id,
+        company_id=target_company_id,
         name=data.name,
         phone_number=data.phone_number,
         role=data.role,
@@ -101,7 +106,7 @@ async def update_contact(
     contact = db.query(EmergencyContact).filter(EmergencyContact.id == contact_id).first()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    if not check_company_access(current_user, contact.company_id):
+    if not check_directory_company_access(current_user, contact.company_id):
         raise HTTPException(status_code=403, detail="No access")
 
     for key, value in data.dict(exclude_unset=True).items():
@@ -121,7 +126,7 @@ async def delete_contact(
     contact = db.query(EmergencyContact).filter(EmergencyContact.id == contact_id).first()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    if not check_company_access(current_user, contact.company_id):
+    if not check_directory_company_access(current_user, contact.company_id):
         raise HTTPException(status_code=403, detail="No access")
 
     db.delete(contact)
