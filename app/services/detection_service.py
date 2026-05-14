@@ -481,11 +481,40 @@ class DetectionService:
         self._prev_frame_gray = None
         self.similarity_threshold = 0.98  # skip if > 98% similar
 
-        self._load_models()
+        # Models ready flag — set to True once background loading completes
+        self._models_ready = threading.Event()
+        self._models_loading_error: Optional[str] = None
+
+        # Load models in a background thread so the HTTP server starts immediately
+        _t = threading.Thread(target=self._load_models_background, daemon=True, name="model-loader")
+        _t.start()
 
     # ==================================================================
     # Model loading
     # ==================================================================
+
+    def _load_models_background(self):
+        """Run _load_models in a background thread and set _models_ready when done."""
+        try:
+            self._load_models()
+        except Exception as exc:
+            self._models_loading_error = str(exc)
+            logger.error("Background model loading failed: %s", exc)
+        finally:
+            self._models_ready.set()
+            if self._models_loading_error:
+                logger.warning("Models NOT fully loaded — detection will be degraded.")
+            else:
+                logger.info("All detection models loaded and ready.")
+
+    def wait_for_models(self, timeout: float = 120.0) -> bool:
+        """Block until models are ready or timeout expires. Returns True if ready."""
+        return self._models_ready.wait(timeout=timeout)
+
+    @property
+    def models_ready(self) -> bool:
+        return self._models_ready.is_set()
+
     def _load_yolo_onnx(self, pt_path: Path, model_name: str):
         """
         Load a YOLO model. Prefer ONNX Runtime (export from `.pt` if needed), else PyTorch.
@@ -1982,12 +2011,24 @@ class DetectionService:
             return ThreatLevel.MEDIUM
         return ThreatLevel.LOW
 
+    # Simple TTL cache so detection frames don't hit the DB on every call.
+    # Keyed by (company_id, minute_bucket) — stale at most 60 s.
+    _module_cache: dict[tuple, dict] = {}
+    _module_cache_lock = threading.Lock()
+
     def get_enabled_modules(
         self,
         db,
         company_id: Optional[int] = None,
     ) -> dict[str, dict[str, Any]]:
         """Return a dict of module_name → settings for modules that are active."""
+        import time
+        bucket = int(time.monotonic() // 60)
+        cache_key = (company_id, bucket)
+        with self._module_cache_lock:
+            if cache_key in self._module_cache:
+                return self._module_cache[cache_key]
+
         from app.models.detection_settings import CompanyDetectionSettings, GlobalModuleSettings
 
         global_settings = {
@@ -2026,6 +2067,13 @@ class DetectionService:
             else:
                 thresholds["alert_on_levels"] = "medium,high,critical"
             enabled[module] = thresholds
+
+        # Store in cache; evict stale keys to avoid unbounded growth
+        with self._module_cache_lock:
+            self._module_cache[cache_key] = enabled
+            stale = [k for k in self._module_cache if k[1] < bucket]
+            for k in stale:
+                del self._module_cache[k]
 
         return enabled
 

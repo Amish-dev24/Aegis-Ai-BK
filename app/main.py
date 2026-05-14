@@ -3,11 +3,13 @@ Main FastAPI application entry point.
 """
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -36,18 +38,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Video job restore failed: %s", e)
 
-    # Run data retention cleanup on startup (non-blocking)
+    # Run data retention cleanup in a background thread — never block startup
     if settings.DATA_RETENTION_DAYS > 0:
-        try:
-            from app.database import SessionLocal
-            from app.services.retention_service import run_retention_cleanup
+        def _run_retention():
+            try:
+                from app.database import SessionLocal
+                from app.services.retention_service import run_retention_cleanup
 
-            db = SessionLocal()
-            result = run_retention_cleanup(db)
-            logger.info("Startup retention cleanup: %s", result.get("message", "done"))
-            db.close()
-        except Exception as e:
-            logger.warning("Startup retention cleanup failed: %s", e)
+                db = SessionLocal()
+                result = run_retention_cleanup(db)
+                db.close()
+                logger.info("Retention cleanup: %s", result.get("message", "done"))
+            except Exception as exc:
+                logger.warning("Retention cleanup failed: %s", exc)
+
+        threading.Thread(target=_run_retention, daemon=True, name="retention-cleanup").start()
 
     yield
     # Shutdown: stop inference worker threads (avoids orphaned processes on reload / kill)
@@ -74,6 +79,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# GZip compression for JSON/text responses >= 1 KB
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # CORS middleware — restrict origins in production
 allowed_origins = ["*"]

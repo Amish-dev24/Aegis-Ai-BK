@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.core.security import get_user_company_filter, require_any_authenticated
@@ -34,42 +34,42 @@ async def get_heatmap_data(
 
     start_date = datetime.utcnow() - timedelta(days=days)
 
-    # Select only the 4 columns needed — avoid loading full Detection ORM objects
-    base_filter = [
-        Detection.detected_at >= start_date,
-        Camera.latitude.isnot(None),
-        Camera.longitude.isnot(None),
-        Detection.company_id == company_filter,
-    ]
-
     rows = (
         db.query(
             Camera.latitude,
             Camera.longitude,
             Camera.zone,
-            Detection.threat_level,
+            func.count(Detection.id).label("count"),
+            func.sum(
+                case(
+                    (Detection.threat_level.in_([ThreatLevel.HIGH, ThreatLevel.CRITICAL]), 1),
+                    else_=0,
+                )
+            ).label("high_threat_count"),
         )
         .join(Camera, Detection.camera_id == Camera.id)
-        .filter(*base_filter)
+        .filter(
+            Detection.detected_at >= start_date,
+            Camera.latitude.isnot(None),
+            Camera.longitude.isnot(None),
+            Detection.company_id == company_filter,
+        )
+        .group_by(Camera.latitude, Camera.longitude, Camera.zone)
         .all()
     )
 
-    heatmap_data: dict[str, dict] = {}
-    for lat, lon, zone, threat_level in rows:
-        key = f"{lat},{lon}"
-        if key not in heatmap_data:
-            heatmap_data[key] = {
+    return {
+        "heatmap": [
+            {
                 "latitude": lat,
                 "longitude": lon,
                 "zone": zone,
-                "count": 0,
-                "high_threat_count": 0,
+                "count": int(count or 0),
+                "high_threat_count": int(high or 0),
             }
-        heatmap_data[key]["count"] += 1
-        if threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL):
-            heatmap_data[key]["high_threat_count"] += 1
-
-    return {"heatmap": list(heatmap_data.values())}
+            for lat, lon, zone, count, high in rows
+        ]
+    }
 
 
 @router.get("/timeline")
@@ -201,3 +201,120 @@ async def get_top_cameras(
     ]
 
     return {"top_cameras": top_cameras}
+
+
+@router.get("/all")
+async def get_all_analytics(
+    request: Request,
+    company_id: Optional[int] = Query(None),
+    days: int = Query(7, ge=1, le=365),
+    top_cameras_limit: int = Query(5, ge=1, le=20),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_authenticated),
+):
+    """
+    Single endpoint that returns all analytics charts in one DB round-trip.
+    Replaces the 5 individual calls (/timeline, /threat-distribution, /by-zone,
+    /top-cameras, /heatmap) with a single request.
+    """
+    company_filter = get_user_company_filter(current_user, company_id)
+    if company_filter is None:
+        return {
+            "timeline": [],
+            "distribution": {},
+            "by_zone": [],
+            "top_cameras": [],
+            "heatmap": [],
+        }
+
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    # 1. Timeline — detections per hour
+    timeline_rows = (
+        db.query(
+            func.date_trunc("hour", Detection.detected_at).label("hour"),
+            func.count(Detection.id).label("count"),
+        )
+        .filter(Detection.detected_at >= start_date, Detection.company_id == company_filter)
+        .group_by(func.date_trunc("hour", Detection.detected_at))
+        .order_by("hour")
+        .all()
+    )
+    timeline = [{"timestamp": str(hour), "count": count} for hour, count in timeline_rows]
+
+    # 2. Threat distribution
+    dist_rows = (
+        db.query(Detection.threat_level, func.count(Detection.id).label("count"))
+        .filter(Detection.detected_at >= start_date, Detection.company_id == company_filter)
+        .group_by(Detection.threat_level)
+        .all()
+    )
+    distribution = {threat.value: count for threat, count in dist_rows}
+
+    # 3. By zone
+    zone_rows = (
+        db.query(Camera.zone, func.count(Detection.id).label("count"))
+        .join(Detection, Camera.id == Detection.camera_id)
+        .filter(Detection.detected_at >= start_date, Detection.company_id == company_filter)
+        .group_by(Camera.zone)
+        .all()
+    )
+    by_zone = [{"zone": zone or "Unknown", "count": count} for zone, count in zone_rows]
+
+    # 4. Top cameras
+    cam_rows = (
+        db.query(
+            Camera.id,
+            Camera.name,
+            Camera.location,
+            func.count(Detection.id).label("count"),
+        )
+        .join(Detection, Camera.id == Detection.camera_id)
+        .filter(Detection.detected_at >= start_date, Detection.company_id == company_filter)
+        .group_by(Camera.id, Camera.name, Camera.location)
+        .order_by(func.count(Detection.id).desc())
+        .limit(top_cameras_limit)
+        .all()
+    )
+    top_cameras = [
+        {"camera_id": cid, "camera_name": name or "", "location": loc or "", "detection_count": int(cnt or 0)}
+        for cid, name, loc, cnt in cam_rows
+    ]
+
+    # 5. Heatmap — aggregated in SQL (no Python row-by-row loop)
+    heatmap_rows = (
+        db.query(
+            Camera.latitude,
+            Camera.longitude,
+            Camera.zone,
+            func.count(Detection.id).label("count"),
+            func.sum(
+                case(
+                    (Detection.threat_level.in_([ThreatLevel.HIGH, ThreatLevel.CRITICAL]), 1),
+                    else_=0,
+                )
+            ).label("high_threat_count"),
+        )
+        .join(Camera, Detection.camera_id == Camera.id)
+        .filter(
+            Detection.detected_at >= start_date,
+            Camera.latitude.isnot(None),
+            Camera.longitude.isnot(None),
+            Detection.company_id == company_filter,
+        )
+        .group_by(Camera.latitude, Camera.longitude, Camera.zone)
+        .all()
+    )
+    heatmap = [
+        {"latitude": lat, "longitude": lon, "zone": zone,
+         "count": int(cnt or 0), "high_threat_count": int(high or 0)}
+        for lat, lon, zone, cnt, high in heatmap_rows
+    ]
+
+    return {
+        "timeline": timeline,
+        "distribution": distribution,
+        "by_zone": by_zone,
+        "top_cameras": top_cameras,
+        "heatmap": heatmap,
+    }
