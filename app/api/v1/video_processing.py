@@ -237,6 +237,20 @@ def _ensure_email_thread():
 def _get_job(job_id: str) -> dict:
     job = _jobs.get(job_id)
     if not job:
+        # Fall back to disk — handles the case where this worker did not create the job
+        # (e.g., accidental multi-worker deploy) or the process restarted after startup.
+        meta_path = _job_meta_path(job_id)
+        if meta_path.exists():
+            try:
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                data.setdefault("detections", [])
+                data.setdefault("upload_path", "")
+                data.setdefault("_pdb", 0)
+                _jobs[job_id] = data
+                job = data
+            except Exception as exc:
+                logger.warning("Could not load job %s from disk: %s", job_id, exc)
+    if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job
 

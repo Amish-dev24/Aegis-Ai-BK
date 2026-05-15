@@ -67,5 +67,8 @@ RUN mkdir -p uploads evidence models processed_videos
 
 EXPOSE 8000
 
-# 2 uvicorn workers — P100 has 16 GB HBM2, can handle parallel inference
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--no-proxy-headers"]
+# Single worker — GPU inference (CUDA) cannot safely share state across OS processes.
+# The in-memory _jobs dict and the CUDA/ORT session are per-process; running >1 worker
+# causes job-status 404s (job created in worker-A, polled by worker-B) and GPU OOM from
+# duplicate model loads.  Internal concurrency is provided by the ThreadPoolExecutor.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-proxy-headers"]
