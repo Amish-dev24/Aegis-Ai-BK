@@ -29,7 +29,8 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Aegis AI Security System"
 
     # Detection Models
-    MODEL_PATH: str = "./models/weapon_detection_v4.pt"  # YOLO — weapon / bags / boxes (v4)
+    WEAPON_MODEL_PATH: str = "./models/weapons_v1.pt"  # YOLO — weapons only (v1)
+    MODEL_PATH: str = "./models/weapon_detection_v4.pt"  # YOLO — bags / boxes only (v4; Weapons class ignored)
     FACE_MODEL_PATH: str = "./models/face_detection.pt"  # YOLOv8 — covered, uncovered
     # Prefer .pth + auto single-file ONNX if split .onnx/.onnx.data is broken; or set path to merged .onnx only
     CROWD_MODEL_PATH: str = "./models/sanet_partB_best.onnx"

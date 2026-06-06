@@ -93,9 +93,14 @@ def persist_detections_for_live_frame(
 
     yolo_results = None
     weapon_conf_eff = float(detection_service.confidence_threshold)
-    if detection_service.weapon_model is not None and (
-        "weapon" in enabled_modules or "abandoned_object" in enabled_modules
-    ):
+    need_weapon_yolo = (
+        "weapon" in enabled_modules and detection_service.weapon_model is not None
+    )
+    need_bag_box_yolo = (
+        "abandoned_object" in enabled_modules
+        and detection_service.bag_box_model is not None
+    )
+    if need_weapon_yolo or need_bag_box_yolo:
         w_minc = enabled_modules.get("weapon", {}).get("min_confidence")
         weapon_conf_eff = (
             float(w_minc) if w_minc is not None else float(detection_service.confidence_threshold)
@@ -120,7 +125,7 @@ def persist_detections_for_live_frame(
         try:
             if ab_settings.get("abandoned_seconds"):
                 detection_service.abandoned_threshold = float(ab_settings["abandoned_seconds"])
-            if detection_service.weapon_model is not None and yolo_results:
+            if detection_service.bag_box_model is not None and yolo_results:
                 for det in detection_service._extract_abandoned(
                     yolo_results, ai_frame, timestamp, object_history
                 ):

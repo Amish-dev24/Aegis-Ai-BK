@@ -2,7 +2,8 @@
 Detection service for integrating with AI models.
 
 Models used:
-- weapon_detection_v4.pt (YOLO) — Bags, Box, Weapons
+- weapons_v1.pt (YOLO) — weapon detection only
+- weapon_detection_v4.pt (YOLO) — Bags, Box (Weapons class ignored)
 - face_detection.pt    (YOLOv8) — classes: {0: covered, 1: uncovered}
 - csrnet_crowd.pth.tar (CSRNet) or sanet_partB_best.pth (SANet) — crowd density
 - MediaPipe Pose       (optional) — violence / aggression detection
@@ -10,7 +11,7 @@ Models used:
 
 Performance optimizations:
 - ONNX Runtime for YOLO / crowd / violence ONNX (CUDA when ``onnxruntime-gpu`` + GPU present, else CPU)
-- YOLO runs ONCE per frame; results shared between weapon + abandoned object detection
+- weapons_v1 + bag/box v4 YOLO run per frame when those modules are enabled
 - All model inferences run in parallel via ThreadPoolExecutor
 - MediaPipe model_complexity=0 (fastest)
 - Lighter optical flow parameters
@@ -50,31 +51,9 @@ def _normalize_model_confidence(v: Optional[float]) -> Optional[float]:
         x = x / 100.0
     return max(0.0, min(1.0, x))
 
-# weapon_detection_v4.pt — expected class names (Ultralytics val table; adjust if your v4 differs):
-#   Bags | Box | Weapons
-# Routing: Weapons → weapon detections; Bags + Box → abandoned / bags_boxes.
+# weapons_v1.pt — weapon-only model (all detections treated as weapons).
+# weapon_detection_v4.pt — Bags | Box | Weapons (only Bags + Box used; Weapons ignored).
 _BAG_BOX_CLASS_NAMES = frozenset({"bags", "bag", "box", "boxes"})
-
-
-def _is_weapon_class(cls_name: str) -> bool:
-    """True if this label is the weapon class (primary: ``Weapons`` from weapon_detection_v4)."""
-    n = cls_name.lower().strip()
-    if not n:
-        return False
-    if n in (
-        "weapon",
-        "weapons",
-        "gun",
-        "guns",
-        "pistol",
-        "rifle",
-        "firearm",
-        "handgun",
-        "knife",
-        "knives",
-    ):
-        return True
-    return "weapon" in n or "gun" in n or "pistol" in n or "rifle" in n or "firearm" in n
 
 
 # Try to import ONNX Runtime — falls back to PyTorch if unavailable
@@ -445,10 +424,13 @@ class DetectionService:
         self.abandoned_threshold = settings.ABANDONED_OBJECT_THRESHOLD_SECONDS
 
         # Model references (populated by _load_models)
-        self.weapon_model = None  # YOLOv8 — Bags / Box / Weapons
-        # When weapon model is loaded from .onnx (fixed input), cap predict imgsz (see ONNX_YOLO_IMGSZ)
+        self.weapon_model = None  # weapons_v1 — weapon detection only
+        self.bag_box_model = None  # weapon_detection_v4 — bags / box only (Weapons class ignored)
+        # When YOLO is loaded from .onnx (fixed input), cap predict imgsz (see ONNX_YOLO_IMGSZ)
         self._weapon_onnx_imgsz_cap: Optional[int] = None
         self._weapon_on_cuda: bool = False  # True when .pt model moved to GPU (enables FP16)
+        self._bag_box_onnx_imgsz_cap: Optional[int] = None
+        self._bag_box_on_cuda: bool = False
         self.face_model = None  # YOLOv8 — covered / uncovered
         self._face_on_cuda: bool = False  # True when .pt model moved to GPU (enables FP16)
         self.crowd_model = None  # CSRNet / SANet (or "onnx" sentinel when using ONNX)
@@ -813,14 +795,28 @@ class DetectionService:
     def _load_models(self):
         """Load all detection models. Each one degrades gracefully."""
 
-        # --- 1. YOLOv8 weapon / object model (Bags, Box, Weapons) ---
-        weapon_path = Path(settings.MODEL_PATH)
+        # --- 1a. weapons_v1 — weapon detection only ---
+        weapon_path = Path(settings.WEAPON_MODEL_PATH)
         if weapon_path.exists():
             self.weapon_model, self._weapon_onnx_imgsz_cap, self._weapon_on_cuda = (
-                self._load_yolo_onnx(weapon_path, "Weapon")
+                self._load_yolo_onnx(weapon_path, "Weapon (v1)")
             )
         else:
-            logger.warning("Weapon model not found at %s — weapon detection disabled", weapon_path)
+            logger.warning(
+                "Weapon model not found at %s — weapon detection disabled", weapon_path
+            )
+
+        # --- 1b. weapon_detection_v4 — bags / box only (Weapons class ignored) ---
+        bag_box_path = Path(settings.MODEL_PATH)
+        if bag_box_path.exists():
+            self.bag_box_model, self._bag_box_onnx_imgsz_cap, self._bag_box_on_cuda = (
+                self._load_yolo_onnx(bag_box_path, "Bag/Box (v4)")
+            )
+        else:
+            logger.warning(
+                "Bag/box model not found at %s — abandoned object detection disabled",
+                bag_box_path,
+            )
 
         # --- 2. YOLOv8 face model (covered / uncovered) ---
         face_path = Path(settings.FACE_MODEL_PATH)
@@ -988,62 +984,105 @@ class DetectionService:
         return score > self.similarity_threshold
 
     # ==================================================================
-    # Shared YOLO inference — run weapon model ONCE, split results
+    # Shared YOLO inference — weapons_v1 + bag/box v4 (separate models)
     # ==================================================================
-    def run_yolo_shared(
-        self, frame: np.ndarray, conf: float = 0.4, imgsz: Optional[int] = None
-    ) -> dict[str, list]:
-        """
-        Run the weapon YOLO model once and split results into categories.
-        Returns {"weapons": [...], "bags_boxes": [...], "all_boxes": [...]}
-        """
-        if self.weapon_model is None:
-            return {"weapons": [], "bags_boxes": [], "all_boxes": []}
-
+    def _resolve_yolo_imgsz(
+        self,
+        frame: np.ndarray,
+        onnx_imgsz_cap: Optional[int],
+        imgsz: Optional[int],
+    ) -> int:
         h, w = frame.shape[:2]
         max_side = max(h, w)
         if imgsz is not None:
             infer_sz = int(imgsz)
         else:
-            # PyTorch: up to WEAPON_YOLO_IMGSZ. ONNX: fixed export (default 640) — larger causes ONNXRuntimeError.
             lim = (
-                self._weapon_onnx_imgsz_cap
-                if self._weapon_onnx_imgsz_cap is not None
+                onnx_imgsz_cap
+                if onnx_imgsz_cap is not None
                 else getattr(settings, "WEAPON_YOLO_IMGSZ", 1280)
             )
             infer_sz = min(max_side, lim)
         infer_sz = max(32, int(infer_sz))
-        if self._weapon_onnx_imgsz_cap is not None:
-            infer_sz = min(infer_sz, self._weapon_onnx_imgsz_cap)
-        results = self.weapon_model(
+        if onnx_imgsz_cap is not None:
+            infer_sz = min(infer_sz, onnx_imgsz_cap)
+        return infer_sz
+
+    def _run_yolo_model(
+        self,
+        model,
+        onnx_imgsz_cap: Optional[int],
+        on_cuda: bool,
+        frame: np.ndarray,
+        conf: float,
+        imgsz: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Run one YOLO model and return normalized detection dicts."""
+        if model is None:
+            return []
+
+        h, w = frame.shape[:2]
+        infer_sz = self._resolve_yolo_imgsz(frame, onnx_imgsz_cap, imgsz)
+        results = model(
             frame,
             conf=conf,
             imgsz=infer_sz,
             verbose=False,
-            half=self._weapon_on_cuda,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
+            half=on_cuda,
         )
 
-        weapons = []
-        bags_boxes = []
-        all_boxes = []
-
+        detections: list[dict[str, Any]] = []
         for result in results:
             for box in result.boxes:
                 cls_id = int(box.cls[0])
-                cls_name = self.weapon_model.names.get(cls_id, "unknown")
+                cls_name = model.names.get(cls_id, "unknown")
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                det = {
-                    "bbox": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
-                    "confidence": float(box.conf[0]),
-                    "class": cls_name,
-                    "pixel_bbox": [x1, y1, x2, y2],
-                }
-                all_boxes.append(det)
+                detections.append(
+                    {
+                        "bbox": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
+                        "confidence": float(box.conf[0]),
+                        "class": cls_name,
+                        "pixel_bbox": [x1, y1, x2, y2],
+                    }
+                )
+        return detections
 
-                if _is_weapon_class(cls_name):
-                    weapons.append(det)
-                elif cls_name.lower().strip() in _BAG_BOX_CLASS_NAMES:
+    def run_yolo_shared(
+        self, frame: np.ndarray, conf: float = 0.4, imgsz: Optional[int] = None
+    ) -> dict[str, list]:
+        """
+        Run weapons_v1 and bag/box v4 models and merge results.
+        Returns {"weapons": [...], "bags_boxes": [...], "all_boxes": [...]}
+        """
+        weapons: list[dict[str, Any]] = []
+        bags_boxes: list[dict[str, Any]] = []
+        all_boxes: list[dict[str, Any]] = []
+
+        if self.weapon_model is not None:
+            weapon_dets = self._run_yolo_model(
+                self.weapon_model,
+                self._weapon_onnx_imgsz_cap,
+                self._weapon_on_cuda,
+                frame,
+                conf,
+                imgsz,
+            )
+            weapons.extend(weapon_dets)
+            all_boxes.extend(weapon_dets)
+
+        if self.bag_box_model is not None:
+            for det in self._run_yolo_model(
+                self.bag_box_model,
+                self._bag_box_onnx_imgsz_cap,
+                self._bag_box_on_cuda,
+                frame,
+                conf,
+                imgsz,
+            ):
+                cls_name = det["class"].lower().strip()
+                if cls_name in _BAG_BOX_CLASS_NAMES:
                     bags_boxes.append(det)
+                    all_boxes.append(det)
 
         return {"weapons": weapons, "bags_boxes": bags_boxes, "all_boxes": all_boxes}
 
@@ -1107,7 +1146,11 @@ class DetectionService:
         # small objects (guns) barely move the correlation score frame-to-frame.
         # Also do not skip when crowd_density is enabled: similarity would return [] before
         # crowd runs, so videos looked like they had no crowd at all.
-        need_yolo = "weapon" in enabled_modules or "abandoned_object" in enabled_modules
+        need_weapon_yolo = "weapon" in enabled_modules and self.weapon_model is not None
+        need_bag_box_yolo = (
+            "abandoned_object" in enabled_modules and self.bag_box_model is not None
+        )
+        need_yolo = need_weapon_yolo or need_bag_box_yolo
         similar = self.is_frame_similar(frame)
         # Violence Conv3D needs temporal context; skipping similar frames would starve the clip.
         if (
@@ -1489,7 +1532,7 @@ class DetectionService:
         h, w = frame.shape[:2]
         detections: list[dict[str, Any]] = []
 
-        if self.weapon_model is not None:
+        if self.bag_box_model is not None:
             yolo_results = self.run_yolo_shared(frame)
             return self._extract_abandoned(yolo_results, frame, frame_timestamp, object_history)
 
