@@ -1290,16 +1290,50 @@ class DetectionService:
     # Violence highlight region (motion-based box for annotation)
     # ==================================================================
     @staticmethod
+    def _violence_clip_motion_score(clip_frames: list[np.ndarray]) -> float:
+        """Mean Farneback magnitude across consecutive pairs in a temporal clip."""
+        if len(clip_frames) < 2:
+            return 0.0
+        mags: list[float] = []
+        for i in range(1, len(clip_frames)):
+            prev_gray = cv2.cvtColor(clip_frames[i - 1], cv2.COLOR_BGR2GRAY)
+            curr_gray = cv2.cvtColor(clip_frames[i], cv2.COLOR_BGR2GRAY)
+            ph, pw = prev_gray.shape[:2]
+            max_side = max(ph, pw)
+            if max_side > 320:
+                scale = 320.0 / float(max_side)
+                nw, nh = max(1, int(pw * scale)), max(1, int(ph * scale))
+                prev_gray = cv2.resize(prev_gray, (nw, nh), interpolation=cv2.INTER_AREA)
+                curr_gray = cv2.resize(curr_gray, (nw, nh), interpolation=cv2.INTER_AREA)
+            flow = cv2.calcOpticalFlowFarneback(
+                prev_gray,
+                curr_gray,
+                None,
+                pyr_scale=0.5,
+                levels=2,
+                winsize=11,
+                iterations=2,
+                poly_n=5,
+                poly_sigma=1.1,
+                flags=0,
+            )
+            mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            if mag.size:
+                mags.append(float(np.mean(mag)))
+        return float(np.mean(mags)) if mags else 0.0
+
+    @staticmethod
     def _violence_motion_bbox(
         curr_bgr: np.ndarray, prev_bgr: Optional[np.ndarray]
     ) -> list[float]:
         """
         Normalized [x, y, w, h] highlighting where motion is strongest (0–1 coords).
         Used to draw a box when violence is flagged (Conv3D has no native localization).
+        Returns [0,0,0,0] when no meaningful motion region exists (avoids fake top-bar boxes).
         """
         h0, w0 = curr_bgr.shape[:2]
         if prev_bgr is None or prev_bgr.size == 0:
-            return [0.02, 0.02, 0.96, 0.14]
+            return [0.0, 0.0, 0.0, 0.0]
         if prev_bgr.shape[:2] != curr_bgr.shape[:2]:
             prev_bgr = cv2.resize(prev_bgr, (w0, h0), interpolation=cv2.INTER_LINEAR)
         prev_gray = cv2.cvtColor(prev_bgr, cv2.COLOR_BGR2GRAY)
@@ -1318,7 +1352,7 @@ class DetectionService:
         )
         mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
         if mag.size == 0:
-            return [0.02, 0.02, 0.96, 0.14]
+            return [0.0, 0.0, 0.0, 0.0]
         p90 = float(np.percentile(mag, 90))
         mean_m = float(np.mean(mag))
         thresh = max(p90, mean_m * 2.5, 0.8)
@@ -1328,7 +1362,7 @@ class DetectionService:
         mask = cv2.dilate(mask, kernel, iterations=1)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            return [0.02, 0.02, 0.96, 0.14]
+            return [0.0, 0.0, 0.0, 0.0]
         x, y, cw, ch = cv2.boundingRect(max(contours, key=cv2.contourArea))
         pad = max(12, min(w0, h0) // 64)
         x1 = max(0, x - pad)
@@ -1336,7 +1370,7 @@ class DetectionService:
         x2 = min(w0, x + cw + pad)
         y2 = min(h0, y + ch + pad)
         if x2 <= x1 or y2 <= y1:
-            return [0.02, 0.02, 0.96, 0.14]
+            return [0.0, 0.0, 0.0, 0.0]
         return [
             x1 / float(w0),
             y1 / float(h0),
@@ -1444,7 +1478,27 @@ class DetectionService:
                 probs = exp_logits / exp_logits.sum()
                 violence_prob = float(probs[1])  # index 1 = violent
 
+                motion_score = self._violence_clip_motion_score(clip_frames)
+                static_max = float(getattr(settings, "VIOLENCE_STATIC_MOTION_MAX", 0.45))
+                static_bypass = float(
+                    getattr(settings, "VIOLENCE_STATIC_BYPASS_CONF", 0.72)
+                )
                 is_violent = violence_prob >= thr
+                if (
+                    is_violent
+                    and motion_score < static_max
+                    and violence_prob < static_bypass
+                ):
+                    logger.debug(
+                        "Violence suppressed on static scene: prob=%.3f motion=%.3f "
+                        "(need motion>=%.3f or prob>=%.3f)",
+                        violence_prob,
+                        motion_score,
+                        static_max,
+                        static_bypass,
+                    )
+                    is_violent = False
+
                 return self._violence_detection_dict(
                     is_violent, violence_prob, "conv3d", frame, previous_frames
                 )

@@ -190,3 +190,30 @@ class TestDefaultThresholds:
     def test_threshold_tuples_are_length_3(self, svc):
         for dt, thresholds in svc.DEFAULT_THRESHOLDS.items():
             assert len(thresholds) == 3, f"{dt} should have (critical, high, medium)"
+
+
+# ── Violence static-scene helpers ────────────────────────────────────────────
+
+
+class TestViolenceStaticSceneHelpers:
+    def test_static_clip_has_low_motion(self, svc):
+        import numpy as np
+
+        frame = np.full((240, 320, 3), 180, dtype=np.uint8)
+        clip = [frame.copy() for _ in range(16)]
+        score = svc._violence_clip_motion_score(clip)
+        assert score < 0.1
+
+    def test_motion_bbox_empty_on_static_pair(self, svc):
+        import numpy as np
+
+        frame = np.full((240, 320, 3), 180, dtype=np.uint8)
+        bbox = svc._violence_motion_bbox(frame, frame.copy())
+        assert bbox == [0.0, 0.0, 0.0, 0.0]
+
+    def test_motion_bbox_empty_without_previous_frame(self, svc):
+        import numpy as np
+
+        frame = np.full((240, 320, 3), 180, dtype=np.uint8)
+        bbox = svc._violence_motion_bbox(frame, None)
+        assert bbox == [0.0, 0.0, 0.0, 0.0]

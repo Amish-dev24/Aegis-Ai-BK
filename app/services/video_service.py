@@ -109,21 +109,26 @@ class VideoService:
         annotated = frame.copy()
         h, w = annotated.shape[:2]
 
-        if bbox and len(bbox) >= 4:
+        colors = {
+            "weapon": (0, 0, 255),  # Red
+            "mask_face": (255, 165, 0),  # Orange
+            "crowd_density": (255, 255, 0),  # Cyan
+            "abandoned_object": (0, 255, 255),  # Yellow
+            "violence": (128, 0, 128),  # Purple
+        }
+        color = colors.get(prefix, (0, 255, 0))
+
+        has_bbox = (
+            bbox
+            and len(bbox) >= 4
+            and float(bbox[2]) > 1e-6
+            and float(bbox[3]) > 1e-6
+        )
+        if has_bbox:
             x1 = int(bbox[0] * w)
             y1 = int(bbox[1] * h)
             x2 = int((bbox[0] + bbox[2]) * w)
             y2 = int((bbox[1] + bbox[3]) * h)
-
-            # Color by prefix type
-            colors = {
-                "weapon": (0, 0, 255),  # Red
-                "mask_face": (255, 165, 0),  # Orange
-                "crowd_density": (255, 255, 0),  # Cyan
-                "abandoned_object": (0, 255, 255),  # Yellow
-                "violence": (128, 0, 128),  # Purple
-            }
-            color = colors.get(prefix, (0, 255, 0))
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
@@ -143,6 +148,21 @@ class VideoService:
                     (255, 255, 255),
                     thickness,
                 )
+        elif label:
+            font_scale = 0.6
+            thickness = 2
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+            lx, ly = 8, th + 12
+            cv2.rectangle(annotated, (lx - 4, ly - th - 8), (lx + tw + 4, ly + 4), color, -1)
+            cv2.putText(
+                annotated,
+                label,
+                (lx, ly),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (255, 255, 255),
+                thickness,
+            )
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{detection_id}_{timestamp}.jpg"

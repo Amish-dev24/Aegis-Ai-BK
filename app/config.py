@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     VIOLENCE_DEFAULT_PROB_THRESHOLD: float = 0.5
     # If set, live RTSP uses this threshold instead of VIOLENCE_DEFAULT_PROB_THRESHOLD (often slightly lower).
     VIOLENCE_LIVE_PROB_THRESHOLD: Optional[float] = None
+    # Mean optical-flow magnitude below this → scene treated as static (desk/backpack, no people).
+    # Low-confidence violence on static clips is suppressed unless prob >= VIOLENCE_STATIC_BYPASS_CONF.
+    VIOLENCE_STATIC_MOTION_MAX: float = 0.45
+    VIOLENCE_STATIC_BYPASS_CONF: float = 0.72
     # Seconds of *analyzed* frames to keep for violence; at high process_fps we subsample 16 frames
     # across this window (avoids 16 near-duplicate frames when analyzing every video frame).
     VIOLENCE_TEMPORAL_WINDOW_SECONDS: float = 2.0
