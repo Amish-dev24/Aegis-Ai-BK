@@ -992,21 +992,18 @@ class DetectionService:
         onnx_imgsz_cap: Optional[int],
         imgsz: Optional[int],
     ) -> int:
+        # Fixed-shape ONNX exports (e.g. 640×640) must use the export size exactly;
+        # Ultralytics letterboxes the frame — passing frame max-side causes ORT errors.
+        if onnx_imgsz_cap is not None:
+            return onnx_imgsz_cap
+
         h, w = frame.shape[:2]
         max_side = max(h, w)
         if imgsz is not None:
             infer_sz = int(imgsz)
         else:
-            lim = (
-                onnx_imgsz_cap
-                if onnx_imgsz_cap is not None
-                else getattr(settings, "WEAPON_YOLO_IMGSZ", 1280)
-            )
-            infer_sz = min(max_side, lim)
-        infer_sz = max(32, int(infer_sz))
-        if onnx_imgsz_cap is not None:
-            infer_sz = min(infer_sz, onnx_imgsz_cap)
-        return infer_sz
+            infer_sz = min(max_side, int(getattr(settings, "WEAPON_YOLO_IMGSZ", 1280)))
+        return max(32, infer_sz)
 
     def _run_yolo_model(
         self,
