@@ -195,6 +195,18 @@ class TestDefaultThresholds:
 # ── Violence static-scene helpers ────────────────────────────────────────────
 
 
+class TestViolenceProbThreshold:
+    def test_floor_blocks_low_tenant_threshold(self):
+        from app.services.detection_service import _resolve_violence_prob_threshold
+
+        assert _resolve_violence_prob_threshold(0.2) >= 0.45
+
+    def test_default_at_least_floor(self):
+        from app.services.detection_service import _resolve_violence_prob_threshold
+
+        assert _resolve_violence_prob_threshold(None) >= 0.45
+
+
 class TestViolenceStaticSceneHelpers:
     def test_static_clip_has_low_motion(self, svc):
         import numpy as np

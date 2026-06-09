@@ -51,6 +51,15 @@ def _normalize_model_confidence(v: Optional[float]) -> Optional[float]:
         x = x / 100.0
     return max(0.0, min(1.0, x))
 
+
+def _resolve_violence_prob_threshold(prob_threshold: Optional[float]) -> float:
+    """Effective P(violence) cutoff: default, tenant override, then hard floor."""
+    default = float(getattr(settings, "VIOLENCE_DEFAULT_PROB_THRESHOLD", 0.5))
+    floor = float(getattr(settings, "VIOLENCE_MIN_PROB_FLOOR", 0.45))
+    if prob_threshold is None:
+        return max(default, floor)
+    return max(float(prob_threshold), floor)
+
 # weapons_v1.pt — weapon-only model (all detections treated as weapons).
 # weapon_detection_v4.pt — Bags | Box | Weapons (only Bags + Box used; Weapons ignored).
 _BAG_BOX_CLASS_NAMES = frozenset({"bags", "bag", "box", "boxes"})
@@ -1424,15 +1433,11 @@ class DetectionService:
         When violent, adds a motion-based ``bbox`` for on-frame annotation.
 
         ``prob_threshold``: minimum P(violence) after softmax to set ``is_violent``; defaults to
-        ``VIOLENCE_DEFAULT_PROB_THRESHOLD``. Pass company's ``min_confidence`` for that module
-        so a 0.2 (20%) tenant setting actually lowers the model cutoff (not only a post-filter).
+        ``VIOLENCE_DEFAULT_PROB_THRESHOLD``. Tenant ``min_confidence`` may raise sensitivity but
+        never below ``VIOLENCE_MIN_PROB_FLOOR`` (weak scores like 20% are ignored).
         """
         # ── Primary: Conv3D trained model ──
-        thr = (
-            float(prob_threshold)
-            if prob_threshold is not None
-            else float(getattr(settings, "VIOLENCE_DEFAULT_PROB_THRESHOLD", 0.5))
-        )
+        thr = _resolve_violence_prob_threshold(prob_threshold)
         if self.violence_onnx_session is not None or self.violence_pt_model is not None:
             n = ViolenceClassifier.NUM_FRAMES
             # Chronological: all priors + current. At high analysis FPS, priors span a long buffer;

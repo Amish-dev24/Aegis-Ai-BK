@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     VIOLENCE_MODEL_ONNX_PATH: Optional[str] = None
     # Min P(violence) to emit a violence detection (softmax index 1)
     VIOLENCE_DEFAULT_PROB_THRESHOLD: float = 0.5
+    # Hard floor — company min_confidence cannot go below this (avoids 20–40% false positives).
+    VIOLENCE_MIN_PROB_FLOOR: float = 0.45
     # If set, live RTSP uses this threshold instead of VIOLENCE_DEFAULT_PROB_THRESHOLD (often slightly lower).
     VIOLENCE_LIVE_PROB_THRESHOLD: Optional[float] = None
     # Mean optical-flow magnitude below this → scene treated as static (desk/backpack, no people).
