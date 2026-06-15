@@ -92,33 +92,23 @@ def persist_detections_for_live_frame(
 
     yolo_results = None
     weapon_conf_eff = float(detection_service.confidence_threshold)
-    need_weapon_yolo = (
-        "weapon" in enabled_modules and detection_service.weapon_model is not None
-    )
+    need_weapon_yolo = "weapon" in enabled_modules and detection_service.weapon_model is not None
     need_bag_box_yolo = (
-        "abandoned_object" in enabled_modules
-        and detection_service.bag_box_model is not None
+        "abandoned_object" in enabled_modules and detection_service.bag_box_model is not None
     )
     if need_weapon_yolo or need_bag_box_yolo:
         w_minc = enabled_modules.get("weapon", {}).get("min_confidence")
         weapon_conf_eff = (
             float(w_minc) if w_minc is not None else float(detection_service.confidence_threshold)
         )
-        yolo_conf = (
-            max(0.01, min(weapon_conf_eff, 0.25))
-            if "weapon" in enabled_modules
-            else 0.25
-        )
+        yolo_conf = max(0.01, min(weapon_conf_eff, 0.25)) if "weapon" in enabled_modules else 0.25
         yolo_results = detection_service.run_yolo_shared(ai_frame, conf=yolo_conf)
 
     if "weapon" in enabled_modules and yolo_results:
         for det in detection_service._extract_weapons(yolo_results, weapon_conf_eff):
             all_raw_detections.append((DetectionType.WEAPON, det))
 
-    if (
-        "abandoned_object" in enabled_modules
-        and object_history is not None
-    ):
+    if "abandoned_object" in enabled_modules and object_history is not None:
         ab_settings = enabled_modules.get("abandoned_object", {})
         saved_thr = detection_service.abandoned_threshold
         try:
@@ -174,7 +164,9 @@ def persist_detections_for_live_frame(
         ):
             continue
 
-        threat_level = detection_service.classify_threat_level(det_type, confidence, det, module_settings)
+        threat_level = detection_service.classify_threat_level(
+            det_type, confidence, det, module_settings
+        )
         bbox = det.get("bbox", [0, 0, 0, 0])
 
         db_detection = Detection(
@@ -199,7 +191,9 @@ def persist_detections_for_live_frame(
             if getattr(settings, "PRIVACY_BLUR_NON_SUBJECT_FACES", True)
             else []
         )
-        snap_frame = video_service.privacy_blur_for_snapshot(frame, det_type.value, bbox, face_boxes)
+        snap_frame = video_service.privacy_blur_for_snapshot(
+            frame, det_type.value, bbox, face_boxes
+        )
         snapshot_path = video_service.save_snapshot(
             snap_frame,
             db_detection.id,
@@ -307,11 +301,11 @@ def open_stream_capture(stream_url: str, low_latency: bool = True) -> cv2.VideoC
         if low_latency:
             # Minimise FFmpeg's internal buffering for real-time playback
             opts_parts += [
-                "fflags;nobuffer",          # skip input buffering
-                "flags;low_delay",          # enable low-delay decoding
-                "probesize;32",             # tiny probe (bytes) — fast open
-                "analyzeduration;0",        # no pre-analysis delay
-                "reorder_queue_size;0",     # no packet reorder buffer
+                "fflags;nobuffer",  # skip input buffering
+                "flags;low_delay",  # enable low-delay decoding
+                "probesize;32",  # tiny probe (bytes) — fast open
+                "analyzeduration;0",  # no pre-analysis delay
+                "reorder_queue_size;0",  # no packet reorder buffer
             ]
 
         extra = str(getattr(settings, "RTSP_FFMPEG_CAPTURE_OPTIONS", "") or "").strip()
@@ -340,7 +334,9 @@ def encode_jpeg_bytes(frame: np.ndarray, quality: int = 82) -> tuple[bool, Optio
     return True, buf.tobytes()
 
 
-def grab_jpeg_snapshot(stream_url: str, timeout_sec: float = 8.0) -> tuple[Optional[bytes], Optional[str]]:
+def grab_jpeg_snapshot(
+    stream_url: str, timeout_sec: float = 8.0
+) -> tuple[Optional[bytes], Optional[str]]:
     """
     Blocking: open RTSP/HTTP URL, read one frame, encode as JPEG.
     Returns (jpeg_bytes_or_none, error_message_or_none).

@@ -179,7 +179,11 @@ async def create_alert(
         camera = db.query(Camera).filter(Camera.id == detection.camera_id).first()
 
         # All recipients: current user + company admins + zone officer
-        alert_emails = get_alert_emails_for_camera(db, camera, current_user.email) if camera else [current_user.email]
+        alert_emails = (
+            get_alert_emails_for_camera(db, camera, current_user.email)
+            if camera
+            else [current_user.email]
+        )
 
         await email_service.send_alert_email(
             to_emails=alert_emails,

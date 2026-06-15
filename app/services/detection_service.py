@@ -60,6 +60,7 @@ def _resolve_violence_prob_threshold(prob_threshold: Optional[float]) -> float:
         return max(default, floor)
     return max(float(prob_threshold), floor)
 
+
 # weapons_v1.pt — weapon-only model (all detections treated as weapons).
 # weapon_detection_v4.pt — Bags | Box | Weapons (only Bags + Box used; Weapons ignored).
 _BAG_BOX_CLASS_NAMES = frozenset({"bags", "bag", "box", "boxes"})
@@ -811,9 +812,7 @@ class DetectionService:
                 self._load_yolo_onnx(weapon_path, "Weapon (v1)")
             )
         else:
-            logger.warning(
-                "Weapon model not found at %s — weapon detection disabled", weapon_path
-            )
+            logger.warning("Weapon model not found at %s — weapon detection disabled", weapon_path)
 
         # --- 1b. weapon_detection_v4 — bags / box only (Weapons class ignored) ---
         bag_box_path = Path(settings.MODEL_PATH)
@@ -898,7 +897,13 @@ class DetectionService:
                 def _resolve_state(obj):
                     if not isinstance(obj, dict):
                         return None
-                    for key in ("model_state_dict", "model_state", "state_dict", "model", "weights"):
+                    for key in (
+                        "model_state_dict",
+                        "model_state",
+                        "state_dict",
+                        "model",
+                        "weights",
+                    ):
                         if key in obj:
                             return obj[key]
                     # If every value is a tensor the dict IS the state dict
@@ -1153,9 +1158,7 @@ class DetectionService:
         # Also do not skip when crowd_density is enabled: similarity would return [] before
         # crowd runs, so videos looked like they had no crowd at all.
         need_weapon_yolo = "weapon" in enabled_modules and self.weapon_model is not None
-        need_bag_box_yolo = (
-            "abandoned_object" in enabled_modules and self.bag_box_model is not None
-        )
+        need_bag_box_yolo = "abandoned_object" in enabled_modules and self.bag_box_model is not None
         need_yolo = need_weapon_yolo or need_bag_box_yolo
         similar = self.is_frame_similar(frame)
         # Violence Conv3D needs temporal context; skipping similar frames would starve the clip.
@@ -1332,9 +1335,7 @@ class DetectionService:
         return float(np.mean(mags)) if mags else 0.0
 
     @staticmethod
-    def _violence_motion_bbox(
-        curr_bgr: np.ndarray, prev_bgr: Optional[np.ndarray]
-    ) -> list[float]:
+    def _violence_motion_bbox(curr_bgr: np.ndarray, prev_bgr: Optional[np.ndarray]) -> list[float]:
         """
         Normalized [x, y, w, h] highlighting where motion is strongest (0–1 coords).
         Used to draw a box when violence is flagged (Conv3D has no native localization).
@@ -1485,15 +1486,9 @@ class DetectionService:
 
                 motion_score = self._violence_clip_motion_score(clip_frames)
                 static_max = float(getattr(settings, "VIOLENCE_STATIC_MOTION_MAX", 0.45))
-                static_bypass = float(
-                    getattr(settings, "VIOLENCE_STATIC_BYPASS_CONF", 0.72)
-                )
+                static_bypass = float(getattr(settings, "VIOLENCE_STATIC_BYPASS_CONF", 0.72))
                 is_violent = violence_prob >= thr
-                if (
-                    is_violent
-                    and motion_score < static_max
-                    and violence_prob < static_bypass
-                ):
+                if is_violent and motion_score < static_max and violence_prob < static_bypass:
                     logger.debug(
                         "Violence suppressed on static scene: prob=%.3f motion=%.3f "
                         "(need motion>=%.3f or prob>=%.3f)",
@@ -2122,6 +2117,7 @@ class DetectionService:
     ) -> dict[str, dict[str, Any]]:
         """Return a dict of module_name → settings for modules that are active."""
         import time
+
         bucket = int(time.monotonic() // 60)
         cache_key = (company_id, bucket)
         with self._module_cache_lock:

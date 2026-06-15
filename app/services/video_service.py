@@ -118,12 +118,7 @@ class VideoService:
         }
         color = colors.get(prefix, (0, 255, 0))
 
-        has_bbox = (
-            bbox
-            and len(bbox) >= 4
-            and float(bbox[2]) > 1e-6
-            and float(bbox[3]) > 1e-6
-        )
+        has_bbox = bbox and len(bbox) >= 4 and float(bbox[2]) > 1e-6 and float(bbox[3]) > 1e-6
         if has_bbox:
             x1 = int(bbox[0] * w)
             y1 = int(bbox[1] * h)

@@ -277,7 +277,12 @@ async def get_all_analytics(
         .all()
     )
     top_cameras = [
-        {"camera_id": cid, "camera_name": name or "", "location": loc or "", "detection_count": int(cnt or 0)}
+        {
+            "camera_id": cid,
+            "camera_name": name or "",
+            "location": loc or "",
+            "detection_count": int(cnt or 0),
+        }
         for cid, name, loc, cnt in cam_rows
     ]
 
@@ -306,8 +311,13 @@ async def get_all_analytics(
         .all()
     )
     heatmap = [
-        {"latitude": lat, "longitude": lon, "zone": zone,
-         "count": int(cnt or 0), "high_threat_count": int(high or 0)}
+        {
+            "latitude": lat,
+            "longitude": lon,
+            "zone": zone,
+            "count": int(cnt or 0),
+            "high_threat_count": int(high or 0),
+        }
         for lat, lon, zone, cnt, high in heatmap_rows
     ]
 

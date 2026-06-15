@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
 
     # Run data retention cleanup in a background thread — never block startup
     if settings.DATA_RETENTION_DAYS > 0:
+
         def _run_retention():
             try:
                 from app.database import SessionLocal

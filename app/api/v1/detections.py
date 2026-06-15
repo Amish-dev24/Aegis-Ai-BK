@@ -495,9 +495,7 @@ async def process_image(
 
     if "violence" in enabled_modules:
         v_minc = enabled_modules.get("violence", {}).get("min_confidence")
-        violence = detection_service.detect_violence(
-            frame, [], timestamp, prob_threshold=v_minc
-        )
+        violence = detection_service.detect_violence(frame, [], timestamp, prob_threshold=v_minc)
         if violence["is_violent"]:
             all_raw_detections.append((DetectionType.VIOLENCE, violence))
 

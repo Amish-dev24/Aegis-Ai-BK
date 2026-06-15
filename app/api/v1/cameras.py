@@ -39,7 +39,9 @@ router = APIRouter(prefix="/cameras", tags=["cameras"])
 
 
 class LiveDetectionStartBody(BaseModel):
-    process_fps: float = Field(default=1.0, ge=0.25, le=15.0, description="Rough target FPS for inference")
+    process_fps: float = Field(
+        default=1.0, ge=0.25, le=15.0, description="Rough target FPS for inference"
+    )
 
 
 def _get_camera_or_404(db: Session, camera_id: int) -> Camera:
@@ -227,7 +229,9 @@ async def camera_preview(
         default=None,
         description="Same JWT as login when the client cannot send Authorization (e.g. HTML img); prefer header when possible",
     ),
-    fps: float = Query(default=12.0, ge=4.0, le=30.0, description="Target output FPS (limits JPEG rate)"),
+    fps: float = Query(
+        default=12.0, ge=4.0, le=30.0, description="Target output FPS (limits JPEG rate)"
+    ),
 ):
     """
     Low-latency MJPEG preview: one long-lived RTSP read loop.
@@ -282,22 +286,14 @@ async def camera_preview(
                         if not cap.isOpened():
                             return
                     ok, frame = await asyncio.to_thread(cap.read)
-                    if (
-                        not ok
-                        or frame is None
-                        or getattr(frame, "size", 0) == 0
-                    ):
+                    if not ok or frame is None or getattr(frame, "size", 0) == 0:
                         await asyncio.sleep(0.05)
                         continue
 
                 ok_j, jpeg = await asyncio.to_thread(encode_jpeg_bytes, frame, 82)
                 if not ok_j or not jpeg:
                     continue
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    b"\r\n" + jpeg + b"\r\n"
-                )
+                yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n" b"\r\n" + jpeg + b"\r\n")
                 elapsed = time.monotonic() - loop_start
                 wait = frame_interval - elapsed
                 if wait > 0:

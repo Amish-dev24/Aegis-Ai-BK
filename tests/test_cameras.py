@@ -95,9 +95,9 @@ class TestListCameras:
         resp = client.get(f"{BASE}?active_only=true", headers=officer_headers)
         assert resp.status_code == 200
         payload = resp.json()
-        assert any(c["id"] == test_camera.id for c in payload), (
-            "active_only must return active cameras (regression: SQLAlchemy `is True` bug)"
-        )
+        assert any(
+            c["id"] == test_camera.id for c in payload
+        ), "active_only must return active cameras (regression: SQLAlchemy `is True` bug)"
         for cam in payload:
             assert cam["is_active"] is True
 

@@ -314,7 +314,7 @@ def _worker(
             notify_extra_emails=notify_extra_emails,
         )
     finally:
-        stop.set()          # ensure reader also exits
+        stop.set()  # ensure reader also exits
         reader.join(timeout=6.0)
         _clear_live_preview_frame(camera_id)
         with _lock:
@@ -394,7 +394,9 @@ def status(camera_id: int) -> Optional[dict[str, Any]]:
             "detections_total": sess.detections_total,
             "alerts_total": sess.alerts_total,
             "last_frame_at": sess.last_frame_at.isoformat() + "Z" if sess.last_frame_at else None,
-            "last_detection_at": sess.last_detection_at.isoformat() + "Z" if sess.last_detection_at else None,
+            "last_detection_at": sess.last_detection_at.isoformat() + "Z"
+            if sess.last_detection_at
+            else None,
             "last_error": sess.last_error,
         }
 

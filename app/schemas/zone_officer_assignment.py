@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field
 
 
 class ZoneOfficerAssignmentBase(BaseModel):
-    zone_name: str = Field(..., min_length=1, max_length=100, description="Zone label (must match Camera.zone)")
+    zone_name: str = Field(
+        ..., min_length=1, max_length=100, description="Zone label (must match Camera.zone)"
+    )
     officer_id: int = Field(..., description="ID of the User with role SECURITY_OFFICER")
 
 

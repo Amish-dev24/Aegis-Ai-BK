@@ -29,9 +29,7 @@ from app.schemas.evidence import EvidenceResponse
 router = APIRouter(prefix="/evidence", tags=["evidence"])
 
 
-def _check_detection_access(
-    detection: Detection, current_user: User, *, read_only: bool = False
-):
+def _check_detection_access(detection: Detection, current_user: User, *, read_only: bool = False):
     """Verify company-level access to the parent detection.
 
     Writes stay tenant-scoped for everyone including aegis_admin. Reads allow
