@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
@@ -35,7 +35,7 @@ from app.services.frame_detection_pipeline import (
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
-_sessions: dict[int, "_LiveSession"] = {}
+_sessions: dict[int, _LiveSession] = {}
 
 # Latest decoded BGR frame per camera — shared between reader thread and preview endpoint.
 _preview_lock = threading.Lock()

@@ -17,10 +17,10 @@ def check_users():
     try:
         users = db.query(User).all()
         user_count = len(users)
-        
+
         print(f"Found {user_count} user(s) in the database:")
         print()
-        
+
         if user_count == 0:
             print("No users found. You can register the first admin user via the API.")
         else:
@@ -32,15 +32,15 @@ def check_users():
                 print(f"    Company ID: {user.company_id}")
                 print(f"    Active: {user.is_active}")
                 print()
-            
+
             print("\nSince users exist, you need admin authentication to register new users.")
             print("You can either:")
             print("  1. Login with an existing admin account")
             print("  2. Delete existing users (if they're test data)")
             print("     Run: python scripts/clear_users.py")
-        
+
         return True
-        
+
     except Exception as e:
         print(f"Error checking users: {e}")
         return False

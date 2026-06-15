@@ -3,17 +3,18 @@ Test if the server is running.
 """
 import sys
 import time
+
 import requests
-from pathlib import Path
+
 
 def test_server():
     """Test if the server is responding."""
     url = "http://localhost:8000"
-    
+
     print("Testing server connection...")
     print(f"URL: {url}")
     print()
-    
+
     max_retries = 5
     for i in range(max_retries):
         try:
@@ -39,7 +40,7 @@ def test_server():
         except Exception as e:
             print(f"ERROR: {e}")
             return False
-    
+
     return False
 
 if __name__ == "__main__":
@@ -50,7 +51,7 @@ if __name__ == "__main__":
         import subprocess
         subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
         import requests
-    
+
     success = test_server()
     sys.exit(0 if success else 1)
 

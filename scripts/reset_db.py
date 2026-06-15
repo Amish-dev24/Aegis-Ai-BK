@@ -1,19 +1,20 @@
-import sys
 import logging
+import sys
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy.orm import Session
+
 from app.database import SessionLocal
-from app.models.user import User, Role
-from app.models.company import Company
-from app.models.camera import Camera
-from app.models.detection import Detection
 from app.models.alert import Alert
-from app.models.evidence import Evidence
 from app.models.audit_log import AuditLog
+from app.models.camera import Camera
+from app.models.company import Company
+from app.models.detection import Detection
+from app.models.evidence import Evidence
+from app.models.user import Role, User
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,11 +23,11 @@ def reset_db():
     db: Session = SessionLocal()
     try:
         logger.info("Starting database reset...")
-        
+
         # 1. Identify Aegis Admin
         admin = db.query(User).filter(User.role == Role.AEGIS_ADMIN).first()
         admin_id = admin.id if admin else None
-        
+
         if not admin:
             logger.warning("No AEGIS_ADMIN found. Database will be completely wiped.")
         else:
@@ -39,23 +40,23 @@ def reset_db():
                 db.commit()
 
         # 2. Delete Data in Order (Child -> Parent)
-        
+
         # Evidence (links to Detection)
         deleted = db.query(Evidence).delete()
         logger.info(f"Deleted {deleted} Evidence records.")
-        
+
         # Alerts (links to Detection, Company)
         deleted = db.query(Alert).delete()
         logger.info(f"Deleted {deleted} Alert records.")
-        
+
         # Detections (links to Camera, Company)
         deleted = db.query(Detection).delete()
         logger.info(f"Deleted {deleted} Detection records.")
-        
+
         # Cameras (links to Company)
         deleted = db.query(Camera).delete()
         logger.info(f"Deleted {deleted} Camera records.")
-        
+
         # Audit Logs (links to User)
         if admin_id:
              deleted = db.query(AuditLog).filter(AuditLog.user_id != admin_id).delete()
@@ -71,7 +72,7 @@ def reset_db():
         else:
             deleted = db.query(User).delete()
             logger.info(f"Deleted {deleted} User records.")
-            
+
         # Companies
         deleted = db.query(Company).delete()
         logger.info(f"Deleted {deleted} Company records.")

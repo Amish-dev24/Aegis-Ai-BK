@@ -8,9 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.database import Base, engine
-from app.models import user, camera, detection, alert, evidence, audit_log, detection_settings
 from app.config import settings
+from app.database import Base, engine
 
 
 def create_tables():
@@ -19,25 +18,22 @@ def create_tables():
         print("Creating database tables...")
         print(f"Database: {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else 'N/A'}")
         print()
-        
+
         # Import all models to register them
-        from app.models import (
-            User, Camera, Detection, Alert, Evidence, AuditLog
-        )
-        
+
         # Create all tables
         Base.metadata.create_all(bind=engine)
-        
+
         print("OK: All tables created successfully!")
         print("\nCreated tables:")
         for table in Base.metadata.tables:
             print(f"  - {table}")
-        
+
         print("\nNext step: Create admin user")
         print("  python scripts/create_admin.py")
-        
+
         return True
-        
+
     except Exception as e:
         print(f"\nERROR: Error creating tables: {e}")
         print("\nPossible issues:")

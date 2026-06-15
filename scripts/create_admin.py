@@ -9,15 +9,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy.orm import Session
-from app.database import SessionLocal, Base, engine
-from app.models.user import User, Role
+
 from app.core.security import get_password_hash
+from app.database import Base, SessionLocal, engine
+from app.models.user import Role, User
+
 
 def create_admin():
     """Create an admin user."""
     # Create tables if they don't exist
     Base.metadata.create_all(bind=engine)
-    
+
     db: Session = SessionLocal()
     try:
         # Check if admin exists
@@ -25,7 +27,7 @@ def create_admin():
         if admin:
             print("Admin user already exists!")
             return
-        
+
         # Create admin user
         admin = User(
             username="admin",

@@ -1,15 +1,16 @@
-from logging.config import fileConfig
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-from alembic import context
 import os
 import sys
+from logging.config import fileConfig
+
+from sqlalchemy import engine_from_config, pool
+
+from alembic import context
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from app.database import Base
 from app.config import settings
+from app.database import Base
 
 # this is the Alembic Config object
 config = context.config
@@ -22,8 +23,18 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import all models so Alembic can detect them
-from app.models import user, company, camera, detection, alert, evidence, audit_log, detection_settings, notification_feed
-from app.models import zone_officer_assignment  # noqa: F401 – ensures table is in metadata
+from app.models import (
+    alert,
+    audit_log,
+    camera,
+    company,
+    detection,
+    detection_settings,
+    evidence,
+    notification_feed,
+    user,
+    zone_officer_assignment,  # noqa: F401 – ensures table is in metadata
+)
 
 target_metadata = Base.metadata
 

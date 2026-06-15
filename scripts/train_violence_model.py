@@ -39,19 +39,18 @@ STEP 3: Model will be saved to
   models/violence_model.onnx
 """
 
-import os
-import sys
 import argparse
 import random
+import sys
 import time
+from pathlib import Path
+
 import cv2
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from pathlib import Path
-
+from torch.utils.data import DataLoader, Dataset
 
 # ============================================================
 # CONFIG
@@ -262,10 +261,10 @@ def train():
         sys.exit(1)
 
     # Shuffle and split
-    combined = list(zip(video_paths, labels))
+    combined = list(zip(video_paths, labels, strict=False))
     random.seed(42)
     random.shuffle(combined)
-    video_paths, labels = zip(*combined)
+    video_paths, labels = zip(*combined, strict=False)
 
     split_idx = int(len(video_paths) * TRAIN_SPLIT)
     train_paths, val_paths = video_paths[:split_idx], video_paths[split_idx:]
@@ -401,8 +400,8 @@ def train():
 
     print(f"\n{'=' * 60}")
     print(f"DONE! Model files saved in: {output_dir}/")
-    print(f"  - violence_model.pt   (PyTorch checkpoint)")
-    print(f"  - violence_model.onnx (ONNX for fast inference)")
+    print("  - violence_model.pt   (PyTorch checkpoint)")
+    print("  - violence_model.onnx (ONNX for fast inference)")
     print(f"  - Best accuracy: {best_val_acc:.1f}%")
     print(f"{'=' * 60}")
 

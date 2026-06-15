@@ -1,6 +1,7 @@
-import httpx
 import asyncio
 import sys
+
+import httpx
 
 BASE_URL = "http://localhost:8000/api/v1"
 
@@ -27,7 +28,7 @@ async def test_audit_logs():
         print("--- Testing as Aegis Admin ---")
         aegis_token = await get_token(client, AEGIS_ADMIN)
         if not aegis_token: return
-        
+
         headers = {"Authorization": f"Bearer {aegis_token}"}
         resp = await client.get(f"{BASE_URL}/audit-logs", headers=headers)
         if resp.status_code == 200:
@@ -42,7 +43,7 @@ async def test_audit_logs():
         print("\n--- Testing as Company Admin ---")
         company_token = await get_token(client, COMPANY_ADMIN)
         if not company_token: return
-        
+
         headers = {"Authorization": f"Bearer {company_token}"}
         resp = await client.get(f"{BASE_URL}/audit-logs", headers=headers)
         if resp.status_code == 200:
@@ -50,7 +51,7 @@ async def test_audit_logs():
             print(f"Company Admin fetched {len(logs)} logs.")
             # Verify filtering?
             # Ideally company admin should only see logs from users in their company.
-            # I can't easily verify 'user.company_id' from the response unless I query users, 
+            # I can't easily verify 'user.company_id' from the response unless I query users,
             # but I trust the backend logic if the count is different or reasonable.
         else:
             print(f"Failed to fetch logs: {resp.status_code} - {resp.text}")

@@ -7,10 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import re
+
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
 from app.config import settings
-import re
 
 
 def parse_database_url(url: str) -> dict:
@@ -20,7 +22,7 @@ def parse_database_url(url: str) -> dict:
     match = re.match(pattern, url)
     if not match:
         raise ValueError(f"Invalid DATABASE_URL format: {url}")
-    
+
     return {
         'user': match.group(1),
         'password': match.group(2),
@@ -34,14 +36,14 @@ def setup_database():
     """Set up the database and user."""
     try:
         db_config = parse_database_url(settings.DATABASE_URL)
-        
+
         print("Setting up database...")
         print(f"  Host: {db_config['host']}")
         print(f"  Port: {db_config['port']}")
         print(f"  Database: {db_config['database']}")
         print(f"  User: {db_config['user']}")
         print()
-        
+
         # Connect to PostgreSQL server (default database)
         try:
             conn = psycopg2.connect(
@@ -53,15 +55,15 @@ def setup_database():
         except psycopg2.OperationalError:
             print("\n⚠️  Could not connect as 'postgres' user.")
             print("   Please create the database manually:")
-            print(f"   1. Connect to PostgreSQL: psql -U postgres")
+            print("   1. Connect to PostgreSQL: psql -U postgres")
             print(f"   2. Run: CREATE DATABASE {db_config['database']};")
             print(f"   3. Run: CREATE USER {db_config['user']} WITH PASSWORD '{db_config['password']}';")
             print(f"   4. Run: GRANT ALL PRIVILEGES ON DATABASE {db_config['database']} TO {db_config['user']};")
             return False
-        
+
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
-        
+
         # Check if database exists
         cursor.execute(
             "SELECT 1 FROM pg_database WHERE datname = %s",
@@ -73,7 +75,7 @@ def setup_database():
             print(f"Creating database '{db_config['database']}'...")
             cursor.execute(f'CREATE DATABASE {db_config["database"]}')
             print(f"✓ Database '{db_config['database']}' created")
-        
+
         # Check if user exists
         cursor.execute(
             "SELECT 1 FROM pg_user WHERE usename = %s",
@@ -88,24 +90,24 @@ def setup_database():
                 (db_config['password'],)
             )
             print(f"✓ User '{db_config['user']}' created")
-        
+
         # Grant privileges
         cursor.execute(
             f"GRANT ALL PRIVILEGES ON DATABASE {db_config['database']} TO {db_config['user']}"
         )
-        print(f"✓ Privileges granted")
-        
+        print("✓ Privileges granted")
+
         cursor.close()
         conn.close()
-        
+
         print("\n✓ Database setup complete!")
         print("\nNext steps:")
         print("  1. Run: python scripts/create_tables.py  (to create tables)")
         print("  2. Run: python scripts/create_admin.py  (to create admin user)")
         print("  3. Or use Alembic: alembic revision --autogenerate -m 'Initial migration'")
-        
+
         return True
-        
+
     except Exception as e:
         print(f"\n✗ Error setting up database: {e}")
         print("\nAlternative: Use Docker Compose")

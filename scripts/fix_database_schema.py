@@ -8,9 +8,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import text, inspect
-from app.database import engine, Base, SessionLocal
+from sqlalchemy import inspect, text
+
 from app.config import settings
+from app.database import Base, engine
 
 
 def fix_database_schema():
@@ -19,17 +20,16 @@ def fix_database_schema():
         print("Checking database schema...")
         print(f"Database: {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else 'N/A'}")
         print()
-        
+
         # Create all tables first (this will create companies table if it doesn't exist)
         print("Creating missing tables...")
-        from app.models import user, company, camera, detection, alert, evidence, audit_log
         Base.metadata.create_all(bind=engine)
         print("[OK] Tables checked/created")
-        
+
         # Check if company_id column exists in users table
         inspector = inspect(engine)
         users_columns = [col['name'] for col in inspector.get_columns('users')]
-        
+
         if 'company_id' not in users_columns:
             print("\nAdding missing 'company_id' column to 'users' table...")
             with engine.connect() as conn:
@@ -37,7 +37,7 @@ def fix_database_schema():
                 if 'companies' not in inspector.get_table_names():
                     print("  Creating companies table first...")
                     Base.metadata.tables['companies'].create(bind=engine)
-                
+
                 # Add company_id column (PostgreSQL doesn't support IF NOT EXISTS in ALTER TABLE)
                 try:
                     conn.execute(text("""
@@ -54,7 +54,7 @@ def fix_database_schema():
                         raise
         else:
             print("[OK] 'company_id' column already exists in 'users' table")
-        
+
         # Verify the fix
         print("\nVerifying schema...")
         inspector = inspect(engine)
@@ -66,7 +66,7 @@ def fix_database_schema():
         else:
             print("[ERROR] Schema fix failed")
             return False
-            
+
     except Exception as e:
         print(f"\n[ERROR] Error fixing schema: {e}")
         print("\nPossible issues:")

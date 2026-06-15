@@ -2,10 +2,10 @@
 Camera management endpoints.
 """
 
-from typing import Optional
-
 import asyncio
 import time
+from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
@@ -20,8 +20,6 @@ from app.core.security import (
     require_security_officer,
     user_from_access_token,
 )
-from pathlib import Path
-
 from app.database import get_db
 from app.models.audit_log import create_audit_log
 from app.models.camera import Camera
@@ -29,8 +27,12 @@ from app.models.detection import Detection
 from app.models.evidence import Evidence
 from app.models.user import User
 from app.schemas.camera import CameraCreate, CameraResponse, CameraUpdate
-from app.services.frame_detection_pipeline import encode_jpeg_bytes, grab_jpeg_snapshot, open_stream_capture
 from app.services import live_camera_runtime
+from app.services.frame_detection_pipeline import (
+    encode_jpeg_bytes,
+    grab_jpeg_snapshot,
+    open_stream_capture,
+)
 from app.services.zone_notification_service import get_alert_emails_for_camera
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])

@@ -4,11 +4,10 @@ Frame→detection persistence for live camera worker (sync, thread-safe).
 Alert rows respect company ``alert_on_levels``; optional ``live_notify`` queues email/SMS like video jobs.
 """
 
-from datetime import datetime
 import logging
-from typing import Any, Optional
-
 import os
+from datetime import datetime
+from typing import Any, Optional
 
 import cv2
 import numpy as np

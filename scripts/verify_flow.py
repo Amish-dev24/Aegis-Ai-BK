@@ -1,7 +1,7 @@
-import sys
-import httpx
-import time
 import logging
+import sys
+
+import httpx
 
 # Configuration
 BASE_URL = "http://localhost:8000/api/v1"
@@ -123,9 +123,9 @@ def run_verification():
         return
 
     # 7. Refresh User A Token (to get new role/company claims if any, though role update might need re-login depending on implementation)
-    # The current implementation of get_current_user fetches user from DB, so role is up to date, 
+    # The current implementation of get_current_user fetches user from DB, so role is up to date,
     # but the token claims 'scopes' might be old if we used them. We verify DB state.
-    
+
     # 8. User A (now Admin) Creates Security Officer (User B)
     logger.info("8. User A (Admin) Creating Security Officer (User B)...")
     user_b_data = {
@@ -157,5 +157,5 @@ if __name__ == "__main__":
     except:
         print("Error: Server not running at http://localhost:8000")
         sys.exit(1)
-        
+
     run_verification()
