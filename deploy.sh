@@ -69,7 +69,19 @@ else
   warn "No GPU detected — using CPU compose (${COMPOSE_FILE})"
 fi
 
-# ── 4. Build image tagged with commit hash ───────────────────────────────────
+# ── 4. Ensure persistent storage dirs exist (evidence survives Stop/Start) ───
+STORAGE_DIRS=(uploads evidence processed_videos models)
+for dir in "${STORAGE_DIRS[@]}"; do
+  mkdir -p "$dir"
+done
+EVIDENCE_COUNT=$(find evidence -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l)
+info "Evidence dir ready ($EVIDENCE_COUNT snapshots on disk)"
+if [ "$EVIDENCE_COUNT" -eq 0 ]; then
+  warn "evidence/ is empty — if RDS has old records, those images will 404 until files exist on disk"
+  warn "Run once on EC2: ./scripts/setup_ec2_storage.sh"
+fi
+
+# ── 5. Build image tagged with commit hash ───────────────────────────────────
 # Use --no-cache only when explicitly requested (FRESH_BUILD=true ./deploy.sh)
 info "Building image aegis-bk:${SHORT_ID} …"
 BUILD_FLAGS="--build-arg COMMIT_ID=$COMMIT_ID"
@@ -83,11 +95,11 @@ COMMIT_ID="$COMMIT_ID" docker compose -f "$COMPOSE_FILE" build $BUILD_FLAGS
 docker tag "$(docker compose -f "$COMPOSE_FILE" images -q api 2>/dev/null | head -1)" \
   "aegis-bk:${SHORT_ID}" 2>/dev/null || true
 
-# ── 5. Roll over (stop old, start new) ───────────────────────────────────────
+# ── 6. Roll over (stop old, start new) ───────────────────────────────────────
 info "Rolling over to ${SHORT_ID} …"
 COMMIT_ID="$COMMIT_ID" docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
-# ── 6. Wait for health check ──────────────────────────────────────────────────
+# ── 7. Wait for health check ──────────────────────────────────────────────────
 info "Waiting for API to become healthy …"
 MAX_WAIT=120
 ELAPSED=0

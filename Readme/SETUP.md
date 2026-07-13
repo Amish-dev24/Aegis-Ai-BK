@@ -219,6 +219,46 @@ docker run -d \
   aegis-ai:latest
 ```
 
+### 4. AWS EC2 — Keep evidence images after restart (Option A)
+
+Detection metadata is stored in **RDS**, but snapshot **files** live on the EC2 disk under `./evidence/`. If that folder is empty after a restart, the UI shows **404** for all images.
+
+**One-time setup on EC2** (after `git clone`):
+
+```bash
+chmod +x scripts/setup_ec2_storage.sh scripts/verify_evidence_storage.sh
+./scripts/setup_ec2_storage.sh
+./deploy.sh
+```
+
+**Rules that matter:**
+
+| Action | Disk kept? | Images after restart? |
+|--------|----------|------------------------|
+| **Stop** → **Start** (same instance) | Yes | Yes, if you deploy from the same folder |
+| **Terminate** instance | No (unless EBS snapshot) | No — all local images lost |
+| Redeploy with `./deploy.sh` | Yes | Yes — bind mounts preserve `./evidence/` |
+| Fresh clone in a new directory | Empty `evidence/` | No — RDS paths point to files that are not on disk |
+
+**Optional — dedicated EBS volume** (extra safety if root disk is small):
+
+1. In AWS Console: EC2 → Volumes → Create volume → Attach to instance (e.g. `/dev/nvme1n1`).
+2. On the instance:
+
+```bash
+sudo EBS_DEVICE=/dev/nvme1n1 ./scripts/setup_ec2_storage.sh --mount-ebs
+./deploy.sh
+```
+
+**Verify after restart:**
+
+```bash
+ls evidence/ | head                    # should list .jpg files
+./scripts/verify_evidence_storage.sh   # checks disk + HTTP /evidence/...
+```
+
+**If images still 404:** RDS still has old paths but files were lost (instance was terminated or deploy used a new empty folder). New detections will work; old ones cannot be recovered without a backup of `evidence/`.
+
 ## Troubleshooting
 
 ### Database Connection Issues
