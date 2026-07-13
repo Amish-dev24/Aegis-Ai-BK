@@ -1039,7 +1039,7 @@ class DetectionService:
             conf=conf,
             imgsz=infer_sz,
             verbose=False,
-            half=on_cuda,
+            quantize=16 if on_cuda else None,
         )
 
         detections: list[dict[str, Any]] = []
@@ -1637,7 +1637,7 @@ class DetectionService:
             frame,
             conf=self.confidence_threshold,
             verbose=False,
-            half=self._face_on_cuda,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
+            quantize=16 if self._face_on_cuda else None,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
         )
         detections: list[dict[str, Any]] = []
 
@@ -1668,7 +1668,7 @@ class DetectionService:
             frame,
             conf=self.confidence_threshold,
             verbose=False,
-            half=self._face_on_cuda,
+            quantize=16 if self._face_on_cuda else None,
         )
         out: list[list[float]] = []
         for result in results:
