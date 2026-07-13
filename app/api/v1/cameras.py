@@ -293,7 +293,7 @@ async def camera_preview(
                 ok_j, jpeg = await asyncio.to_thread(encode_jpeg_bytes, frame, 82)
                 if not ok_j or not jpeg:
                     continue
-                yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n" b"\r\n" + jpeg + b"\r\n")
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
                 elapsed = time.monotonic() - loop_start
                 wait = frame_interval - elapsed
                 if wait > 0:

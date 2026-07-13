@@ -1663,7 +1663,9 @@ class DetectionService:
             frame,
             conf=self.confidence_threshold,
             verbose=False,
-            **_yolo_fp16_predict_kw(self._face_on_cuda),  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
+            **_yolo_fp16_predict_kw(
+                self._face_on_cuda
+            ),  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
         )
         detections: list[dict[str, Any]] = []
 
@@ -1990,8 +1992,7 @@ class DetectionService:
                 cv_ratio = map_std / (map_mean + 1e-8)
 
                 logger.info(
-                    "CSRNet raw=%.1f (scaled x%.1f), peak_ratio=%.1f, cv=%.1f, "
-                    "max=%.4f, mean=%.4f",
+                    "CSRNet raw=%.1f (scaled x%.1f), peak_ratio=%.1f, cv=%.1f, max=%.4f, mean=%.4f",
                     raw_count,
                     scale_factor,
                     peak_ratio,
