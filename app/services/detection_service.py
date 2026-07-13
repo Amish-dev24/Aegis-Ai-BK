@@ -65,6 +65,32 @@ def _resolve_violence_prob_threshold(prob_threshold: Optional[float]) -> float:
 # weapon_detection_v4.pt — Bags | Box | Weapons (only Bags + Box used; Weapons ignored).
 _BAG_BOX_CLASS_NAMES = frozenset({"bags", "bag", "box", "boxes"})
 
+_ultralytics_logging_configured = False
+
+
+def _configure_ultralytics_logging() -> None:
+    """Reduce Ultralytics noise; suppress half→quantize deprecation until quantize works in predict."""
+    global _ultralytics_logging_configured
+    if _ultralytics_logging_configured:
+        return
+    _ultralytics_logging_configured = True
+
+    class _HalfDeprecationFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            return "'half' is deprecated" not in msg and "'int8' is deprecated" not in msg
+
+    half_filter = _HalfDeprecationFilter()
+    for name in ("ultralytics",):
+        ul = logging.getLogger(name)
+        ul.setLevel(logging.WARNING)
+        ul.addFilter(half_filter)
+
+
+def _yolo_fp16_predict_kw(use_fp16: bool) -> dict[str, Any]:
+    """FP16 kwargs for YOLO predict — half until installed ultralytics accepts quantize in predict."""
+    return {"half": True} if use_fp16 else {}
+
 
 # Try to import ONNX Runtime — falls back to PyTorch if unavailable
 try:
@@ -522,7 +548,7 @@ class DetectionService:
             return None, None, False
 
         # Reduce "Loading models... / CPUExecutionProvider" noise on first inference
-        logging.getLogger("ultralytics").setLevel(logging.WARNING)
+        _configure_ultralytics_logging()
 
         fixed_cap = int(getattr(settings, "ONNX_YOLO_IMGSZ", 640))
         onnx_path = pt_path.with_suffix(".onnx")
@@ -786,7 +812,7 @@ class DetectionService:
         try:
             from ultralytics import YOLO
 
-            logging.getLogger("ultralytics").setLevel(logging.WARNING)
+            _configure_ultralytics_logging()
             self._crowd_calibration_yolo = YOLO(load_target)
             _try_move_yolo_to_cuda(self._crowd_calibration_yolo, "Crowd calibration YOLO")
             logger.info("Crowd calibration YOLO ready: %s", load_target)
@@ -1039,7 +1065,7 @@ class DetectionService:
             conf=conf,
             imgsz=infer_sz,
             verbose=False,
-            quantize=16 if on_cuda else None,
+            **_yolo_fp16_predict_kw(on_cuda),
         )
 
         detections: list[dict[str, Any]] = []
@@ -1637,7 +1663,7 @@ class DetectionService:
             frame,
             conf=self.confidence_threshold,
             verbose=False,
-            quantize=16 if self._face_on_cuda else None,  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
+            **_yolo_fp16_predict_kw(self._face_on_cuda),  # FP16 on CUDA .pt — ~2x faster on Turing+ GPUs
         )
         detections: list[dict[str, Any]] = []
 
@@ -1668,7 +1694,7 @@ class DetectionService:
             frame,
             conf=self.confidence_threshold,
             verbose=False,
-            quantize=16 if self._face_on_cuda else None,
+            **_yolo_fp16_predict_kw(self._face_on_cuda),
         )
         out: list[list[float]] = []
         for result in results:
