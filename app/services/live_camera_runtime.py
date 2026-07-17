@@ -324,7 +324,7 @@ def _worker(
 def start_live(
     camera_id: int,
     stream_url: str,
-    process_fps: float = 1.0,
+    process_fps: float = 5.0,
     *,
     notify_user_email: Optional[str] = None,
     notify_alert_preference: str = "email",

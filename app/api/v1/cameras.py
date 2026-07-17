@@ -40,7 +40,7 @@ router = APIRouter(prefix="/cameras", tags=["cameras"])
 
 class LiveDetectionStartBody(BaseModel):
     process_fps: float = Field(
-        default=1.0, ge=0.25, le=15.0, description="Rough target FPS for inference"
+        default=5.0, ge=0.25, le=15.0, description="Rough target FPS for inference"
     )
 
 
