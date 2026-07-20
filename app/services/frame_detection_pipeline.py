@@ -6,6 +6,8 @@ Alert rows respect company ``alert_on_levels``; optional ``live_notify`` queues 
 
 import logging
 import os
+import threading
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -22,6 +24,23 @@ from app.services.detection_service import _normalize_model_confidence, detectio
 from app.services.video_service import video_service
 
 logger = logging.getLogger(__name__)
+
+# Wowza Cloud rate-limits rapid reconnects (playlist often returns 403 after the first hit).
+# Cache recent JPEGs and serialize opens per URL so UI polling does not burn the stream.
+_snapshot_cache_lock = threading.Lock()
+_snapshot_jpeg_cache: dict[str, tuple[float, bytes]] = {}
+_SNAPSHOT_CACHE_TTL_SEC = 12.0
+_open_locks_guard = threading.Lock()
+_open_locks: dict[str, threading.Lock] = {}
+
+
+def _url_open_lock(url: str) -> threading.Lock:
+    with _open_locks_guard:
+        lock = _open_locks.get(url)
+        if lock is None:
+            lock = threading.Lock()
+            _open_locks[url] = lock
+        return lock
 
 
 def _live_ai_frame_pair(full_bgr: np.ndarray, prior_full: list) -> tuple[np.ndarray, list]:
@@ -349,13 +368,19 @@ def open_stream_capture(stream_url: str, low_latency: bool = True) -> cv2.VideoC
 
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(opts_parts)
 
-    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    if cap.isOpened():
-        # Buffer=1: reader always gets the most recent frame, not a queued-up old one
-        buf = 1 if low_latency else int(getattr(settings, "RTSP_CAPTURE_BUFFER_SIZE", 2))
-        buf = max(1, min(buf, 16))
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, buf)
-    return cap
+    lock = _url_open_lock(url)
+    with lock:
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if not cap.isOpened() and "entrypoint.cloud.wowza.com" in url.lower():
+            # Wowza often 403s on rapid reconnect — brief pause then one retry
+            time.sleep(1.25)
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if cap.isOpened():
+            # Buffer=1: reader always gets the most recent frame, not a queued-up old one
+            buf = 1 if low_latency else int(getattr(settings, "RTSP_CAPTURE_BUFFER_SIZE", 2))
+            buf = max(1, min(buf, 16))
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, buf)
+        return cap
 
 
 def encode_jpeg_bytes(frame: np.ndarray, quality: int = 82) -> tuple[bool, Optional[bytes]]:
@@ -374,27 +399,38 @@ def grab_jpeg_snapshot(
     Blocking: open RTSP/HTTP URL, read one frame, encode as JPEG.
     Returns (jpeg_bytes_or_none, error_message_or_none).
     """
-    import time as time_mod
+    url = normalize_stream_url(stream_url)
+    now = time.monotonic()
+    with _snapshot_cache_lock:
+        cached = _snapshot_jpeg_cache.get(url)
+        if cached and now - cached[0] <= _SNAPSHOT_CACHE_TTL_SEC:
+            return cached[1], None
 
-    cap = open_stream_capture(stream_url)
+    cap = open_stream_capture(url)
     if not cap.isOpened():
+        with _snapshot_cache_lock:
+            cached = _snapshot_jpeg_cache.get(url)
+            if cached:
+                return cached[1], None
         return None, "Could not open stream URL"
 
-    deadline = time_mod.monotonic() + timeout_sec
+    deadline = time.monotonic() + timeout_sec
     frame = None
     try:
-        while time_mod.monotonic() < deadline:
+        while time.monotonic() < deadline:
             ok, frm = cap.read()
             if ok and frm is not None and frm.size > 0:
                 frame = frm
                 break
-            time_mod.sleep(0.05)
+            time.sleep(0.05)
         if frame is None:
             return None, "Timed out reading frame"
 
         ok_j, jpeg = encode_jpeg_bytes(frame, quality=82)
         if not ok_j or not jpeg:
             return None, "JPEG encode failed"
+        with _snapshot_cache_lock:
+            _snapshot_jpeg_cache[url] = (time.monotonic(), jpeg)
         return jpeg, None
     finally:
         cap.release()

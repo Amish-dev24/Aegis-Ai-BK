@@ -262,13 +262,28 @@ async def camera_preview(
             detail="Camera has no stream_url configured",
         )
 
-    stream_url = str(camera.stream_url).strip()
+    stream_url = normalize_stream_url(str(camera.stream_url).strip())
     frame_interval = 1.0 / fps
 
+    # Prefer frames from the live-detection reader when it is already connected.
+    shared0 = await asyncio.to_thread(live_camera_runtime.get_live_preview_frame, camera_id, 3.0)
+    starter_cap = None
+    if shared0 is None:
+        starter_cap = await asyncio.to_thread(open_stream_capture, stream_url)
+        if not starter_cap.isOpened():
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    "Could not open camera stream. "
+                    "For Wowza Cloud, use the HLS URL "
+                    "(…/playlist.m3u8), not the RTSP entrypoint URL."
+                ),
+            )
+
     async def mjpeg_stream():
-        # When live detection is running, reuse its decoder so we do not open a second RTSP client
+        # When live detection is running, reuse its decoder so we do not open a second client
         # (many devices allow only one stream or drop frames under dual read).
-        cap = None
+        cap = starter_cap
         try:
             while True:
                 if await request.is_disconnected():
@@ -290,7 +305,11 @@ async def camera_preview(
                             return
                     ok, frame = await asyncio.to_thread(cap.read)
                     if not ok or frame is None or getattr(frame, "size", 0) == 0:
-                        await asyncio.sleep(0.05)
+                        # HLS/RTSP can drop briefly — reopen once after a short pause
+                        await asyncio.sleep(0.15)
+                        if cap is not None:
+                            await asyncio.to_thread(cap.release)
+                            cap = None
                         continue
 
                 ok_j, jpeg = await asyncio.to_thread(encode_jpeg_bytes, frame, 82)
