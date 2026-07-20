@@ -31,6 +31,7 @@ from app.services import live_camera_runtime
 from app.services.frame_detection_pipeline import (
     encode_jpeg_bytes,
     grab_jpeg_snapshot,
+    normalize_stream_url,
     open_stream_capture,
 )
 from app.services.zone_notification_service import get_alert_emails_for_camera
@@ -83,6 +84,8 @@ async def create_camera(
             detail="Cannot assign a camera to another company",
         )
     camera_dict["company_id"] = cid
+    if camera_dict.get("stream_url"):
+        camera_dict["stream_url"] = normalize_stream_url(str(camera_dict["stream_url"]))
 
     db_camera = Camera(**camera_dict)
     db.add(db_camera)
@@ -415,6 +418,8 @@ async def update_camera(
     _ensure_camera_company_access(camera, current_user)
 
     update_data = camera_update.dict(exclude_unset=True)
+    if "stream_url" in update_data and update_data["stream_url"]:
+        update_data["stream_url"] = normalize_stream_url(str(update_data["stream_url"]))
     for field, value in update_data.items():
         setattr(camera, field, value)
 

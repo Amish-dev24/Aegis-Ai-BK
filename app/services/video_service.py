@@ -72,7 +72,9 @@ class VideoService:
         Yields:
             Tuple of (frame, timestamp)
         """
-        cap = cv2.VideoCapture(stream_url)
+        from app.services.frame_detection_pipeline import open_stream_capture
+
+        cap = open_stream_capture(stream_url, low_latency=True)
 
         try:
             while True:

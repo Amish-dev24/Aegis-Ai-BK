@@ -280,6 +280,39 @@ def persist_detections_for_live_frame(
     return detections_created, alerts_created, detection_results
 
 
+def normalize_stream_url(stream_url: str) -> str:
+    """
+    Rewrite stream URLs that OpenCV/FFmpeg cannot play as-is.
+
+    Wowza Cloud ``entrypoint.cloud.wowza.com`` RTSP URLs often accept DESCRIBE
+    but return ``SETUP 403 Forbidden`` (ingest-style endpoint). The same
+    app/stream path serves HLS playback that FFmpeg can open:
+
+      rtsp://host:1935/app/stream
+        -> http://host:1935/app/stream/playlist.m3u8
+    """
+    from urllib.parse import urlparse
+
+    url = (stream_url or "").strip()
+    if not url:
+        return url
+
+    lower = url.lower()
+    if not lower.startswith("rtsp://"):
+        return url
+    if "entrypoint.cloud.wowza.com" not in lower:
+        return url
+
+    parsed = urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+    if not path or path.endswith(".m3u8"):
+        return url
+
+    hls = f"http://{parsed.netloc}{path}/playlist.m3u8"
+    logger.info("Rewrote Wowza RTSP entrypoint to HLS playback URL")
+    return hls
+
+
 def open_stream_capture(stream_url: str, low_latency: bool = True) -> cv2.VideoCapture:
     """
     Open a live URL with settings that minimise RTSP lag.
@@ -291,7 +324,7 @@ def open_stream_capture(stream_url: str, low_latency: bool = True) -> cv2.VideoC
     - ``probesize`` / ``analyzeduration`` reduced so the stream opens
       faster (typically shaves 1-3 s off initial connection time).
     """
-    url = (stream_url or "").strip()
+    url = normalize_stream_url(stream_url)
     if not url:
         return cv2.VideoCapture()
 
